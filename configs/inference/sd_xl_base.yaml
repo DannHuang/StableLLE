@@ -3,6 +3,7 @@ model:
   params:
     scale_factor: 0.13025
     disable_first_stage_autocast: True
+    ckpt_path: /home/jenyuan/zoo/sd/sd_xl_base_1.0.safetensors
 
     denoiser_config:
       target: sgm.modules.diffusionmodules.denoiser.DiscreteDenoiser
@@ -42,13 +43,15 @@ model:
             params:
               layer: hidden
               layer_idx: 11
+              local_dir: /home/jenyuan/zoo/clip/vit_l_patch14
 
           - is_trainable: False
             input_key: txt
             target: sgm.modules.encoders.modules.FrozenOpenCLIPEmbedder2
             params:
               arch: ViT-bigG-14
-              version: laion2b_s39b_b160k
+              # version: laion2b_s39b_b160k
+              version: /home/jenyuan/zoo/clip/vit_bigG_patch14/open_clip_pytorch_model.bin
               freeze: True
               layer: penultimate
               always_return_pooled: True

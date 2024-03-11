@@ -342,11 +342,16 @@ class FrozenCLIPEmbedder(AbstractEmbModel):
         layer="last",
         layer_idx=None,
         always_return_pooled=False,
+        local_dir=None,
     ):  # clip-vit-base-patch32
         super().__init__()
         assert layer in self.LAYERS
-        self.tokenizer = CLIPTokenizer.from_pretrained(version)
-        self.transformer = CLIPTextModel.from_pretrained(version)
+        if local_dir is not None:
+            self.tokenizer = CLIPTokenizer.from_pretrained(local_dir, local_files_only=True)
+            self.transformer = CLIPTextModel.from_pretrained(local_dir, local_files_only=True)
+        else: 
+            self.tokenizer = CLIPTokenizer.from_pretrained(version)
+            self.transformer = CLIPTextModel.from_pretrained(version)
         self.device = device
         self.max_length = max_length
         if freeze:

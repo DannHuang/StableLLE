@@ -1,3 +1,6 @@
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from pytorch_lightning import seed_everything
 
 from scripts.demo.streamlit_helpers import *
@@ -41,7 +44,7 @@ VERSION2SPECS = {
         "f": 8,
         "is_legacy": False,
         "config": "configs/inference/sd_xl_base.yaml",
-        "ckpt": "checkpoints/sd_xl_base_1.0.safetensors",
+        "ckpt": "/home/jenyuan/zoo/sd_xl_base_1.0.safetensors",
     },
     "SDXL-base-0.9": {
         "H": 1024,
@@ -59,7 +62,7 @@ VERSION2SPECS = {
         "f": 8,
         "is_legacy": True,
         "config": "configs/inference/sd_2_1.yaml",
-        "ckpt": "checkpoints/v2-1_512-ema-pruned.safetensors",
+        "ckpt": "/home/jenyuan/zoo/v2-1_512-ema-pruned.safetensors",
     },
     "SD-2.1-768": {
         "H": 768,
