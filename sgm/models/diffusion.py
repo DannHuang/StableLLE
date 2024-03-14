@@ -1,4 +1,5 @@
 import math
+import random
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -7,6 +8,12 @@ import torch
 from omegaconf import ListConfig, OmegaConf
 from safetensors.torch import load_file as load_safetensors
 from torch.optim.lr_scheduler import LambdaLR
+from torchvision.transforms.functional import normalize
+
+from basicsr.utils import DiffJPEG, USMSharp
+from basicsr.utils.img_process_util import filter2D
+from basicsr.data.transforms import paired_random_crop
+from basicsr.data.degradations import random_add_gaussian_noise_pt, random_add_poisson_noise_pt
 
 from ..modules import UNCONDITIONAL_CONFIG
 from ..modules.autoencoding.temporal_ae import VideoDecoder
@@ -112,7 +119,6 @@ class DiffusionEngine(pl.LightningModule):
     def get_input(self, batch):
         # assuming unified data format, dataloader returns a dict.
         # image tensors should be scaled to -1 ... 1 and in bchw format
-        print(batch.keys())
         return batch[self.input_key]
 
     @torch.no_grad()
@@ -348,7 +354,9 @@ class IRDiffusionEngine(pl.LightningModule):
         network_config,
         denoiser_config,
         first_stage_config,
+        restorer_config: Union[None, Dict, ListConfig, OmegaConf] = None,
         struct_cond_config: Union[None, Dict, ListConfig, OmegaConf] = None,
+        degradation_config: Union[None, Dict, ListConfig, OmegaConf] = None,
         conditioner_config: Union[None, Dict, ListConfig, OmegaConf] = None,
         sampler_config: Union[None, Dict, ListConfig, OmegaConf] = None,
         optimizer_config: Union[None, Dict, ListConfig, OmegaConf] = None,
@@ -365,7 +373,8 @@ class IRDiffusionEngine(pl.LightningModule):
         no_cond_log: bool = False,
         compile_model: bool = False,
         en_and_decode_n_samples_a_time: Optional[int] = None,
-        freeze_unet: Optional[bool] = True,
+        freeze_unet: bool = True,
+        restorer_w: float = 1.0,
     ):
         super().__init__()
         self.log_keys = log_keys
@@ -373,11 +382,11 @@ class IRDiffusionEngine(pl.LightningModule):
         self.optimizer_config = default(
             optimizer_config, {"target": "torch.optim.AdamW"}
         )
-        model = instantiate_from_config(network_config)
+        self.freeze_unet = freeze_unet
+        model = self._init_model(network_config)
         self.model = get_obj_from_str(default(network_wrapper, OPENAIUNETWRAPPER))(
             model, compile_model=compile_model
         )
-        if freeze_unet: self.freeze_model()
 
         self.denoiser = instantiate_from_config(denoiser_config)
         self.sampler = (
@@ -388,9 +397,10 @@ class IRDiffusionEngine(pl.LightningModule):
         self.conditioner = instantiate_from_config(
             default(conditioner_config, UNCONDITIONAL_CONFIG)
         )
-        self.struct_cond_model = instantiate_from_config(struct_cond_config)
         self.scheduler_config = scheduler_config
+        self.degradation_config = degradation_config
         self._init_first_stage(first_stage_config)
+        self._init_first_restorer(restorer_config)
 
         self.loss_fn = (
             instantiate_from_config(loss_fn_config)
@@ -406,12 +416,13 @@ class IRDiffusionEngine(pl.LightningModule):
         self.scale_factor = scale_factor
         self.disable_first_stage_autocast = disable_first_stage_autocast
         self.no_cond_log = no_cond_log
+        self.restorer_w = restorer_w
 
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path)
 
         self.en_and_decode_n_samples_a_time = en_and_decode_n_samples_a_time
-
+    
     def init_from_ckpt(
         self,
         path: str,
@@ -432,12 +443,18 @@ class IRDiffusionEngine(pl.LightningModule):
         if len(unexpected) > 0:
             print(f"Unexpected Keys: {unexpected}")
 
-    def freeze_model(self):
-        self.model = self.model.eval()
-        self.model.train = disabled_train
-        for param in self.model.parameters():
-            param.requires_grad = False
-
+    def _init_model(self, config):
+        if self.freeze_unet:
+            model = instantiate_from_config(config).eval()
+            for name, param in model.named_parameters():
+                if 'spade' not in name and 'lq_encoder' not in name:
+                    param.requires_grad = False
+                else:
+                    param.requires_grad = True
+        else:
+            model = instantiate_from_config(config)
+        return model
+    
     def _init_first_stage(self, config):
         model = instantiate_from_config(config).eval()
         model.train = disabled_train
@@ -445,26 +462,41 @@ class IRDiffusionEngine(pl.LightningModule):
             param.requires_grad = False
         self.first_stage_model = model
 
+    def _init_first_restorer(self, config):
+        model = instantiate_from_config(config).eval()
+        model.train = disabled_train
+        for param in model.parameters():
+            param.requires_grad = False
+        self.restorer = model
+
     @torch.no_grad()
-    def get_input(self, batch, k=None, return_first_stage_outputs=False, force_c_encode=False,
-                  cond_key=None, return_original_cond=False, bs=None, val=False, text_cond=[''], return_gt=False, resize_lq=True):
+    def get_input(self, batch, bs=None, val=False, text_cond=[''], resize_lq=True):
 
         """
-            output: [LQ latent, text-prompt, HQ latent, LQ, HQ, HQ-rec, ...]
+            output: {
+                gt: input,
+                gt_path: input dir,
+                txt: text condition,
+                original_size_as_tuple: raw input size,
+                target_size_as_tuple: resize size,
+                crop_coords_top_left: crop coordinate,
+                lq: degradated input,
+                cf_out: CodeFormer output,
+                struct_cond_dict: CodeFormer feature-dict
+                }
         """
-
+        val = not self.training
         if not hasattr(self, 'jpeger'):
-            jpeger = DiffJPEG(differentiable=False).cuda()  # simulate JPEG compression artifacts
+            self.jpeger = DiffJPEG(differentiable=False).cuda()  # simulate JPEG compression artifacts
         if not hasattr(self, 'usm_sharpener'):
-            usm_sharpener = USMSharp().cuda()  # do usm sharpening
+            self.usm_sharpener = USMSharp().cuda()  # do usm sharpening
         
         im_gt = batch['gt'].cuda()
-        if self.use_usm:
-            im_gt = usm_sharpener(im_gt)
+        im_gt = self.usm_sharpener(im_gt)
         im_gt = im_gt.to(memory_format=torch.contiguous_format).float()
-        kernel1 = batch['kernel1'].cuda()
-        kernel2 = batch['kernel2'].cuda()
-        sinc_kernel = batch['sinc_kernel'].cuda()
+        kernel1 = batch.pop('kernel1').cuda()
+        kernel2 = batch.pop('kernel2').cuda()
+        sinc_kernel = batch.pop('sinc_kernel').cuda()
 
         ori_h, ori_w = im_gt.size()[2:4]        # 512x512
 
@@ -474,22 +506,22 @@ class IRDiffusionEngine(pl.LightningModule):
         # random resize
         updown_type = random.choices(
                 ['up', 'down', 'keep'],
-                self.configs.degradation['resize_prob'],
+                self.degradation_config['resize_prob'],
                 )[0]
         if updown_type == 'up':
-            scale = random.uniform(1, self.configs.degradation['resize_range'][1])
+            scale = random.uniform(1, self.degradation_config['resize_range'][1])
         elif updown_type == 'down':
-            scale = random.uniform(self.configs.degradation['resize_range'][0], 1)
+            scale = random.uniform(self.degradation_config['resize_range'][0], 1)
         else:
             scale = 1
         mode = random.choice(['area', 'bilinear', 'bicubic'])
-        out = F.interpolate(out, scale_factor=scale, mode=mode)
+        out = torch.nn.functional.interpolate(out, scale_factor=scale, mode=mode)
         # add noise
-        gray_noise_prob = self.configs.degradation['gray_noise_prob']
-        if random.random() < self.configs.degradation['gaussian_noise_prob']:
+        gray_noise_prob = self.degradation_config['gray_noise_prob']
+        if random.random() < self.degradation_config['gaussian_noise_prob']:
             out = random_add_gaussian_noise_pt(
                 out,
-                sigma_range=self.configs.degradation['noise_range'],
+                sigma_range=self.degradation_config['noise_range'],
                 clip=True,
                 rounds=False,
                 gray_prob=gray_noise_prob,
@@ -497,43 +529,43 @@ class IRDiffusionEngine(pl.LightningModule):
         else:
             out = random_add_poisson_noise_pt(
                 out,
-                scale_range=self.configs.degradation['poisson_scale_range'],
+                scale_range=self.degradation_config['poisson_scale_range'],
                 gray_prob=gray_noise_prob,
                 clip=True,
                 rounds=False)
         # JPEG compression
-        jpeg_p = out.new_zeros(out.size(0)).uniform_(*self.configs.degradation['jpeg_range'])
+        jpeg_p = out.new_zeros(out.size(0)).uniform_(*self.degradation_config['jpeg_range'])
         out = torch.clamp(out, 0, 1)  # clamp to [0, 1], otherwise JPEGer will result in unpleasant artifacts
-        out = jpeger(out, quality=jpeg_p)
+        out = self.jpeger(out, quality=jpeg_p)
 
         # ----------------------- The second degradation process ----------------------- #
         # blur
-        if random.random() < self.configs.degradation['second_blur_prob']:
+        if random.random() < self.degradation_config['second_blur_prob']:
             out = filter2D(out, kernel2)
         # random resize
         updown_type = random.choices(
                 ['up', 'down', 'keep'],
-                self.configs.degradation['resize_prob2'],
+                self.degradation_config['resize_prob2'],
                 )[0]
         if updown_type == 'up':
-            scale = random.uniform(1, self.configs.degradation['resize_range2'][1])
+            scale = random.uniform(1, self.degradation_config['resize_range2'][1])
         elif updown_type == 'down':
-            scale = random.uniform(self.configs.degradation['resize_range2'][0], 1)
+            scale = random.uniform(self.degradation_config['resize_range2'][0], 1)
         else:
             scale = 1
         mode = random.choice(['area', 'bilinear', 'bicubic'])
-        out = F.interpolate(
+        out = torch.nn.functional.interpolate(
                 out,
-                size=(int(ori_h / self.configs.sf * scale),
-                    int(ori_w / self.configs.sf * scale)),
+                size=(int(ori_h / self.degradation_config['sf'] * scale),
+                    int(ori_w / self.degradation_config['sf'] * scale)),
                 mode=mode,
                 )
         # add noise
-        gray_noise_prob = self.configs.degradation['gray_noise_prob2']
-        if random.random() < self.configs.degradation['gaussian_noise_prob2']:
+        gray_noise_prob = self.degradation_config['gray_noise_prob2']
+        if random.random() < self.degradation_config['gaussian_noise_prob2']:
             out = random_add_gaussian_noise_pt(
                 out,
-                sigma_range=self.configs.degradation['noise_range2'],
+                sigma_range=self.degradation_config['noise_range2'],
                 clip=True,
                 rounds=False,
                 gray_prob=gray_noise_prob,
@@ -541,7 +573,7 @@ class IRDiffusionEngine(pl.LightningModule):
         else:
             out = random_add_poisson_noise_pt(
                 out,
-                scale_range=self.configs.degradation['poisson_scale_range2'],
+                scale_range=self.degradation_config['poisson_scale_range2'],
                 gray_prob=gray_noise_prob,
                 clip=True,
                 rounds=False,
@@ -557,28 +589,28 @@ class IRDiffusionEngine(pl.LightningModule):
         if random.random() < 0.5:
             # resize back + the final sinc filter
             mode = random.choice(['area', 'bilinear', 'bicubic'])
-            out = F.interpolate(
+            out = torch.nn.functional.interpolate(
                     out,
-                    size=(ori_h // self.configs.sf,
-                        ori_w // self.configs.sf),
+                    size=(ori_h // self.degradation_config['sf'],
+                        ori_w // self.degradation_config['sf']),
                     mode=mode,
                     )
             out = filter2D(out, sinc_kernel)
             # JPEG compression
-            jpeg_p = out.new_zeros(out.size(0)).uniform_(*self.configs.degradation['jpeg_range2'])
+            jpeg_p = out.new_zeros(out.size(0)).uniform_(*self.degradation_config['jpeg_range2'])
             out = torch.clamp(out, 0, 1)
-            out = jpeger(out, quality=jpeg_p)
+            out = self.jpeger(out, quality=jpeg_p)
         else:
             # JPEG compression
-            jpeg_p = out.new_zeros(out.size(0)).uniform_(*self.configs.degradation['jpeg_range2'])
+            jpeg_p = out.new_zeros(out.size(0)).uniform_(*self.degradation_config['jpeg_range2'])
             out = torch.clamp(out, 0, 1)
-            out = jpeger(out, quality=jpeg_p)
+            out = self.jpeger(out, quality=jpeg_p)
             # resize back + the final sinc filter
             mode = random.choice(['area', 'bilinear', 'bicubic'])
-            out = F.interpolate(
+            out = torch.nn.functional.interpolate(
                     out,
-                    size=(ori_h // self.configs.sf,
-                        ori_w // self.configs.sf),
+                    size=(ori_h // self.degradation_config['sf'],
+                        ori_w // self.degradation_config['sf']),
                     mode=mode,
                     )
             out = filter2D(out, sinc_kernel)
@@ -587,30 +619,30 @@ class IRDiffusionEngine(pl.LightningModule):
         im_lq = torch.clamp(out, 0, 1.0)
 
         # random crop
-        gt_size = self.configs.degradation['gt_size']           # 512x512
-        im_gt, im_lq = paired_random_crop(im_gt, im_lq, gt_size, self.configs.sf)
+        gt_size = self.degradation_config['gt_size']           # 512x512
+        im_gt, im_lq = paired_random_crop(im_gt, im_lq, gt_size, self.degradation_config['sf'])
         self.lq, self.gt = im_lq, im_gt
 
         if resize_lq:                   # resize back to 512x512
-            self.lq = F.interpolate(
+            self.lq = torch.nn.functional.interpolate(
                     self.lq,
                     size=(self.gt.size(-2),
                         self.gt.size(-1)),
                     mode='bicubic',
                     )
 
-        if random.random() < self.configs.degradation['no_degradation_prob'] or torch.isnan(self.lq).any():
+        if random.random() < self.degradation_config['no_degradation_prob'] or torch.isnan(self.lq).any():
             self.lq = self.gt
 
         # training pair pool
-        if not val and not self.random_size:
+        if not val and not self.degradation_config['random_size']:
             self._dequeue_and_enqueue()
         # sharpen self.gt again, as we have changed the self.gt with self._dequeue_and_enqueue
         self.lq = self.lq.contiguous()  # for the warning: grad and param do not obey the gradient layout contract
         self.lq = self.lq*2 - 1.0
         self.gt = self.gt*2 - 1.0
 
-        if self.random_size:
+        if self.degradation_config['random_size']:
             self.lq, self.gt = self.randn_cropinput(self.lq, self.gt)
 
         self.lq = torch.clamp(self.lq, -1.0, 1.0)
@@ -622,36 +654,82 @@ class IRDiffusionEngine(pl.LightningModule):
             y = y[:bs]
         x = x.to(self.device)
         y = y.to(self.device)
-        # Encode LQ
-        encoder_posterior = self.encode_first_stage(x)
-        z = self.get_first_stage_encoding(encoder_posterior).detach()
-        # Encode HQ
-        encoder_posterior_y = self.encode_first_stage(y)
-        z_gt = self.get_first_stage_encoding(encoder_posterior_y).detach()
+        # # Encode LQ
+        # z = self.encode_first_stage(x)
+        # # Encode HQ
+        # z_gt = self.encode_first_stage(y)
 
+        # process text input
         xc = None
-        if self.use_positional_encodings:
-            assert NotImplementedError
-            pos_x, pos_y = self.compute_latent_shifts(batch)
-            c = {'pos_x': pos_x, 'pos_y': pos_y}
-
-        while len(text_cond) < z.size(0):
+        while len(text_cond) < x.size(0):
             text_cond.append(text_cond[-1])
-        if len(text_cond) > z.size(0):
-            text_cond = text_cond[:z.size(0)]
-        assert len(text_cond) == z.size(0)
+        if len(text_cond) > x.size(0):
+            text_cond = text_cond[:x.size(0)]
+        assert len(text_cond) == x.size(0)
 
-        out = [z, text_cond]
-        out.append(z_gt)
+        batch['gt'] = y
+        batch['lq'] = x
+        batch['txt'] = text_cond
+        cropped_face_t = (x+1.0)/2.0
+        normalize(cropped_face_t, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
+        cf_recon, struct_c = self.restorer(cropped_face_t, w=self.restorer_w, adain=False, hq_code=False)
+        batch['cf_out'] = cf_recon
+        batch['struct_cond_dict'] = struct_c
 
-        if return_first_stage_outputs:
-            xrec = self.decode_first_stage(z_gt)
-            out.extend([x, self.gt, xrec])
-        if return_original_cond:
-            out.append(xc)
+        return batch
 
-        return out
+    def randn_cropinput(self, lq, gt, base_size=[64, 128, 256, 512]):
+        cur_size_h = random.choice(base_size)
+        cur_size_w = random.choice(base_size)
+        init_h = lq.size(-2)//2
+        init_w = lq.size(-1)//2
+        lq = lq[:, :, init_h-cur_size_h//2:init_h+cur_size_h//2, init_w-cur_size_w//2:init_w+cur_size_w//2]
+        gt = gt[:, :, init_h-cur_size_h//2:init_h+cur_size_h//2, init_w-cur_size_w//2:init_w+cur_size_w//2]
+        assert lq.size(-1)>=64
+        assert lq.size(-2)>=64
+        return [lq, gt]
+    
+    @torch.no_grad()
+    def _dequeue_and_enqueue(self):
+        """It is the training pair pool for increasing the diversity in a batch, taken from Real-ESRGAN:
+        https://github.com/xinntao/Real-ESRGAN
 
+        Batch processing limits the diversity of synthetic degradations in a batch. For example, samples in a
+        batch could not have different resize scaling factors. Therefore, we employ this training pair pool
+        to increase the degradation diversity in a batch.
+        """
+        # initialize
+        b, c, h, w = self.lq.size()
+        if b == self.degradation_config['batch_size']:
+            if not hasattr(self, 'queue_size'):
+                self.queue_size = self.degradation_config.get('queue_size', b*50)
+            if not hasattr(self, 'queue_lr'):
+                assert self.queue_size % b == 0, f'queue size {self.queue_size} should be divisible by batch size {b}'
+                self.queue_lr = torch.zeros(self.queue_size, c, h, w).cuda()
+                _, c, h, w = self.gt.size()
+                self.queue_gt = torch.zeros(self.queue_size, c, h, w).cuda()
+                self.queue_ptr = 0
+            if self.queue_ptr == self.queue_size:  # the pool is full
+                # do dequeue and enqueue
+                # shuffle
+                idx = torch.randperm(self.queue_size)
+                self.queue_lr = self.queue_lr[idx]
+                self.queue_gt = self.queue_gt[idx]
+                # get first b samples
+                lq_dequeue = self.queue_lr[0:b, :, :, :].clone()
+                gt_dequeue = self.queue_gt[0:b, :, :, :].clone()
+                # update the queue
+                self.queue_lr[0:b, :, :, :] = self.lq.clone()
+                self.queue_gt[0:b, :, :, :] = self.gt.clone()
+
+                self.lq = lq_dequeue
+                self.gt = gt_dequeue
+            else:
+                # only do enqueue
+                self.queue_lr[self.queue_ptr:self.queue_ptr + b, :, :, :] = self.lq.clone()
+                self.queue_gt[self.queue_ptr:self.queue_ptr + b, :, :, :] = self.gt.clone()
+                self.queue_ptr = self.queue_ptr + b
+    
     @torch.no_grad()
     def decode_first_stage(self, z):
         z = 1.0 / self.scale_factor * z
@@ -694,8 +772,9 @@ class IRDiffusionEngine(pl.LightningModule):
         return loss_mean, loss_dict
 
     def shared_step(self, batch: Dict) -> Any:
-        x = self.get_input(batch)
-        x = self.encode_first_stage(x)
+        batch = self.get_input(batch)
+        x = self.encode_first_stage(batch['gt'])
+        batch['struct_cond'] = self.encode_first_stage(batch['cf_out'])
         batch["global_step"] = self.global_step
         loss, loss_dict = self(x, batch)
         return loss, loss_dict
@@ -779,12 +858,12 @@ class IRDiffusionEngine(pl.LightningModule):
         uc: Union[Dict, None] = None,
         batch_size: int = 16,
         shape: Union[None, Tuple, List] = None,
-        **kwargs,
+        **additional_model_inputs,
     ):
-        randn = torch.randn(batch_size, *shape).to(self.device)
+        randn = torch.randn(batch_size, *shape).to(self.device)     # init latent of shape [N, 4, 64, 64]
 
         denoiser = lambda input, sigma, c: self.denoiser(
-            self.model, input, sigma, c, **kwargs
+            self.model, input, sigma, c, **additional_model_inputs
         )
         samples = self.sampler(denoiser, randn, cond, uc=uc)
         return samples
@@ -844,10 +923,10 @@ class IRDiffusionEngine(pl.LightningModule):
                 f"but we have {ucg_keys} vs. {conditioner_input_keys}"
             )
         else:
-            ucg_keys = conditioner_input_keys
+            ucg_keys = conditioner_input_keys   # Unconditional Guidance set to zero
         log = dict()
 
-        x = self.get_input(batch)
+        batch = self.get_input(batch)
 
         c, uc = self.conditioner.get_unconditional_conditioning(
             batch,
@@ -857,12 +936,18 @@ class IRDiffusionEngine(pl.LightningModule):
         )
 
         sampling_kwargs = {}
+        
+        input = batch['gt']
+        lq = batch['lq']
 
-        N = min(x.shape[0], N)
-        x = x.to(self.device)[:N]
-        log["inputs"] = x
-        z = self.encode_first_stage(x)
-        log["reconstructions"] = self.decode_first_stage(z)
+        N = min(input.shape[0], N)
+        input = input.to(self.device)[:N]
+        lq = lq.to(self.device)[:N]
+        log["inputs"] = lq
+        log["gt"] = input
+        z_gt = self.encode_first_stage(input)
+        z_cf = self.encode_first_stage(batch['cf_out'][:N])
+        log["cf"] = batch['cf_out'][:N]
         log.update(self.log_conditionings(batch, N))
 
         for k in c:
@@ -872,7 +957,7 @@ class IRDiffusionEngine(pl.LightningModule):
         if sample:
             with self.ema_scope("Plotting"):
                 samples = self.sample(
-                    c, shape=z.shape[1:], uc=uc, batch_size=N, **sampling_kwargs
+                    c, shape=z_gt.shape[1:], uc=uc, batch_size=N, struct_cond=z_cf, **sampling_kwargs
                 )
             samples = self.decode_first_stage(samples)
             log["samples"] = samples
