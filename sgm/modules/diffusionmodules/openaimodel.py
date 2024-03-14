@@ -8,6 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch.utils.checkpoint import checkpoint
+from functools import partial
+checkpoint = partial(checkpoint, use_reentrant=False)
 
 from ...modules.attention import SpatialTransformer
 from ...modules.spade import SPADE
@@ -63,6 +65,17 @@ class TimestepBlock(nn.Module):
         Apply the module to `x` given `emb` timestep embeddings.
         """
 
+class TimestepBlockDual(nn.Module):
+    """
+    Any module where forward() takes timestep embeddings as a second argument.
+    """
+
+    @abstractmethod
+    def forward(self, x: th.Tensor, emb: th.Tensor, cond: th.Tensor):
+        """
+        Apply the module to `x` given `emb` timestep embeddings and conditiong cond.
+        """
+
 
 class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     """
@@ -75,6 +88,7 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
         x: th.Tensor,
         emb: th.Tensor,
         context: Optional[th.Tensor] = None,
+        struct_cond: Optional[th.Tensor] = None,
         image_only_indicator: Optional[th.Tensor] = None,
         time_context: Optional[int] = None,
         num_video_frames: Optional[int] = None,
@@ -88,6 +102,8 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
                 module, VideoResBlock
             ):
                 x = layer(x, emb)
+            elif isinstance(module, TimestepBlockDual):
+                x = layer(x, emb, struct_cond)
             elif isinstance(module, VideoResBlock):
                 x = layer(x, emb, num_video_frames, image_only_indicator)
             elif isinstance(module, SpatialVideoTransformer):
@@ -353,9 +369,9 @@ class ResBlock(TimestepBlock):
             h = h + emb_out
             h = self.out_layers(h)
         return self.skip_connection(x) + h
-    
 
-class ResBlockDual(TimestepBlock):
+
+class ResBlockDual(TimestepBlockDual):
     """
     A residual block that can optionally change the number of channels.
     :param channels: the number of input channels.
@@ -391,10 +407,10 @@ class ResBlockDual(TimestepBlock):
         super().__init__()
         self.channels = channels
         self.emb_channels = emb_channels
+        self.use_checkpoint = use_checkpoint
         self.dropout = dropout
         self.out_channels = out_channels or channels
         self.use_conv = use_conv
-        self.use_checkpoint = use_checkpoint
         self.use_scale_shift_norm = use_scale_shift_norm
         self.exchange_temb_dims = exchange_temb_dims
 
@@ -485,7 +501,7 @@ class ResBlockDual(TimestepBlock):
             return self._forward(x, emb, s_cond)
 
 
-    def _forward(self, x: th.Tensor, emb: th.Tensor, s_cond: th.Tensor) -> th.Tensor:
+    def _forward(self, x: th.Tensor, emb: th.Tensor, s_cond: Optional[th.Tensor]) -> th.Tensor:
         if self.updown:
             in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
             h = in_rest(x)
@@ -551,7 +567,10 @@ class AttentionBlock(nn.Module):
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
     def forward(self, x: th.Tensor, **kwargs) -> th.Tensor:
-        return checkpoint(self._forward, x)
+        if self.use_checkpoint:
+            return checkpoint(self._forward, x)
+        else:
+            return self._forward(x)
 
     def _forward(self, x: th.Tensor) -> th.Tensor:
         b, c, *spatial = x.shape
@@ -1045,6 +1064,7 @@ class DualUNetModel(nn.Module):
 
     def __init__(
         self,
+        lq_cond_config,
         in_channels: int,
         model_channels: int,
         out_channels: int,
@@ -1132,6 +1152,7 @@ class DualUNetModel(nn.Module):
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
         self.semb_channels = semb_channels
+        self.lq_encoder = UNetEncoder(**lq_cond_config)
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -1446,6 +1467,7 @@ class DualUNetModel(nn.Module):
         assert (y is not None) == (
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
+        h_lq = self.lq_encoder(struct_cond, timesteps)
         hs = []
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
         emb = self.time_embed(t_emb)
@@ -1456,12 +1478,12 @@ class DualUNetModel(nn.Module):
 
         h = x
         for module in self.input_blocks:
-            h = module(h, emb, context, struct_cond)
+            h = module(h, emb, context, h_lq)
             hs.append(h)
-        h = self.middle_block(h, emb, context, struct_cond)
+        h = self.middle_block(h, emb, context, h_lq)
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb, context, struct_cond)
+            h = module(h, emb, context, h_lq)
         h = h.type(x.dtype)
 
         return self.out(h)
@@ -1594,7 +1616,7 @@ class UNetEncoder(nn.Module):
             ]
         )
         self._feature_size = model_channels
-        input_block_chans = [model_channels]
+        input_block_chans = []
         ch = model_channels
         ds = 1
         for level, mult in enumerate(channel_mult):
@@ -1637,7 +1659,6 @@ class UNetEncoder(nn.Module):
                         )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
-                input_block_chans.append(ch)
             if level != len(channel_mult) - 1:
                 out_ch = ch
                 self.input_blocks.append(
@@ -1700,17 +1721,25 @@ class UNetEncoder(nn.Module):
         input_block_chans.append(ch)
         self.input_block_chans = input_block_chans
 
-        # self.out = nn.Sequential(
-        #     normalization(ch),
-        #     nn.SiLU(),
-        #     zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
-        # )
+        self.fea_tran = nn.ModuleList([])
+
+        for i in range(len(input_block_chans)):
+            self.fea_tran.append(
+                ResBlock(
+                    input_block_chans[i],
+                    time_embed_dim,
+                    dropout,
+                    out_channels=out_channels,
+                    dims=dims,
+                    use_checkpoint=use_checkpoint,
+                    use_scale_shift_norm=use_scale_shift_norm,
+                )
+            )
 
     def forward(
         self,
         x: th.Tensor,
         timesteps: Optional[th.Tensor] = None,
-        y: Optional[th.Tensor] = None,
         **kwargs,
     ) -> th.Tensor:
         """
@@ -1721,17 +1750,22 @@ class UNetEncoder(nn.Module):
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
-        hs = []
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
         emb = self.time_embed(t_emb)
 
+        result_list = []
+        results = {}
         h = x
         for module in self.input_blocks:
+            last_h = h
             h = module(h, emb)
+            if last_h.shape[-1] != h.shape[-1]:
+                result_list.append(last_h)
         h = self.middle_block(h, emb)
-        h = h.type(x.dtype)
+        result_list.append(h)
+        assert len(result_list) == len(self.fea_tran)
 
-        return h
+        for i in range(len(result_list)):
+            results[str(result_list[i].size(-1))] = self.fea_tran[i](result_list[i], emb)
+
+        return results

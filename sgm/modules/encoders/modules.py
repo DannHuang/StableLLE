@@ -120,6 +120,13 @@ class GeneralConditioner(nn.Module):
     def forward(
         self, batch: Dict, force_zero_embeddings: Optional[List] = None
     ) -> Dict:
+        '''
+        :return dict: 
+            { 'vector': torch.Tensor([batch, dim1+dim2...]),
+              'crossattn': torch.Tensor([batch, channels, dim1+dim2...]),
+              'concat': torch.Tensor([batch, dim1+dim2..., H, W])
+            }
+        '''
         output = dict()
         if force_zero_embeddings is None:
             force_zero_embeddings = []
@@ -342,16 +349,16 @@ class FrozenCLIPEmbedder(AbstractEmbModel):
         layer="last",
         layer_idx=None,
         always_return_pooled=False,
-        local_dir=None,
+        local_dir=None
     ):  # clip-vit-base-patch32
         super().__init__()
         assert layer in self.LAYERS
-        if local_dir is not None:
-            self.tokenizer = CLIPTokenizer.from_pretrained(local_dir, local_files_only=True)
-            self.transformer = CLIPTextModel.from_pretrained(local_dir, local_files_only=True)
-        else: 
+        if local_dir is None:
             self.tokenizer = CLIPTokenizer.from_pretrained(version)
             self.transformer = CLIPTextModel.from_pretrained(version)
+        else: 
+            self.tokenizer = CLIPTokenizer.from_pretrained(local_dir, local_files_only=True)
+            self.transformer = CLIPTextModel.from_pretrained(local_dir, local_files_only=True)
         self.device = device
         self.max_length = max_length
         if freeze:

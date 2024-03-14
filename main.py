@@ -19,7 +19,7 @@ from packaging import version
 from PIL import Image
 from pytorch_lightning import seed_everything
 from pytorch_lightning.callbacks import Callback
-from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.utilities import rank_zero_only
 
@@ -326,6 +326,10 @@ class ImageLogger(Callback):
         self.rescale = rescale
         self.batch_freq = batch_frequency
         self.max_images = max_images
+        self.logger_log_images = {
+            TensorBoardLogger: self._tensorboard_log_img,
+            WandbLogger: self._wandb_log_img
+        }
         self.log_steps = [2**n for n in range(int(np.log2(self.batch_freq)) + 1)]
         if not increase_log_steps:
             self.log_steps = [self.batch_freq]
@@ -337,6 +341,22 @@ class ImageLogger(Callback):
         self.log_before_first_step = log_before_first_step
 
     @rank_zero_only
+    def _tensorboard_log_img(self, k, img, batch_idx, split, pl_module=None):
+        pl_module.logger.experiment.add_image(
+            f"{split}/{k}", img,
+            global_step=pl_module.global_step)
+            
+    @rank_zero_only
+    def _wandb_log_img(self, k, img, batch_idx, split, pl_module=None):
+        pl_module.logger.log_image(
+                    key=f"{split}/{k}",
+                    images=[
+                        img,
+                    ],
+                    step=pl_module.global_step,
+                )
+    
+    @rank_zero_only
     def log_local(
         self,
         save_dir,
@@ -345,7 +365,7 @@ class ImageLogger(Callback):
         global_step,
         current_epoch,
         batch_idx,
-        pl_module: Union[None, pl.LightningModule] = None,
+        logger_log_images = None,
     ):
         root = os.path.join(save_dir, "images", split)
         for k in images:
@@ -369,6 +389,8 @@ class ImageLogger(Callback):
                 grid = torchvision.utils.make_grid(images[k], nrow=4)
                 if self.rescale:
                     grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
+                if logger_log_images:
+                    logger_log_images(k, grid, batch_idx, split)
                 grid = grid.transpose(0, 1).transpose(1, 2).squeeze(-1)
                 grid = grid.numpy()
                 grid = (grid * 255).astype(np.uint8)
@@ -379,17 +401,6 @@ class ImageLogger(Callback):
                 os.makedirs(os.path.split(path)[0], exist_ok=True)
                 img = Image.fromarray(grid)
                 img.save(path)
-                if exists(pl_module):
-                    assert isinstance(
-                        pl_module.logger, WandbLogger
-                    ), "logger_log_image only supports WandbLogger currently"
-                    pl_module.logger.log_image(
-                        key=f"{split}/{k}",
-                        images=[
-                            img,
-                        ],
-                        step=pl_module.global_step,
-                    )
 
     @rank_zero_only
     def log_img(self, pl_module, batch, batch_idx, split="train"):
@@ -426,6 +437,10 @@ class ImageLogger(Callback):
                     if self.clamp and not isheatmap(images[k]):
                         images[k] = torch.clamp(images[k], -1.0, 1.0)
 
+            logger_log_images = self.logger_log_images.get(logger, None)
+            if logger_log_images:
+                logger_log_images = lambda key, grid, batch_idx, split: \
+                    logger_log_images(key, grid, batch_idx, split, pl_module=pl_module)
             self.log_local(
                 pl_module.logger.save_dir,
                 split,
@@ -433,9 +448,7 @@ class ImageLogger(Callback):
                 pl_module.global_step,
                 pl_module.current_epoch,
                 batch_idx,
-                pl_module=pl_module
-                if isinstance(pl_module.logger, WandbLogger)
-                else None,
+                logger_log_images=logger_log_images,
             )
 
             if is_train:
@@ -685,8 +698,15 @@ if __name__ == "__main__":
                     "save_dir": logdir,
                 },
             },
+            "tensorboard": {
+                "target": "pytorch_lightning.loggers.TensorBoardLogger",
+                "params": {
+                    "name": "tensorboard",
+                    "save_dir": logdir,
+                }
+            },
         }
-        default_logger_cfg = default_logger_cfgs["wandb" if opt.wandb else "csv"]
+        default_logger_cfg = default_logger_cfgs["wandb" if opt.wandb else "tensorboard"]
         if opt.wandb:
             # TODO change once leaving "swiffer" config directory
             try:
@@ -701,6 +721,8 @@ if __name__ == "__main__":
                 config=config,
                 name_str=nowname,
             )
+        else:
+            os.makedirs(os.path.join(logdir, 'tensorboard'), exist_ok=True)
         if "logger" in lightning_config:
             logger_cfg = lightning_config.logger
         else:

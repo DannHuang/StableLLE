@@ -1,0 +1,366 @@
+model:
+  base_learning_rate: 5.0e-5
+  target: sgm.models.diffusion.IRDiffusionEngine
+  params:
+    scale_factor: 0.13025
+    # ckpt_path: /mnt/lustrenew/huangrenyuan/zoo/StableDiffusion/sd_xl_base_1.0.safetensors
+    input_key: gt
+    disable_first_stage_autocast: True
+    freeze_unet: True
+    restorer_w: 1.0
+    log_keys:
+      - cls
+
+    scheduler_config:
+      target: sgm.lr_scheduler.LambdaLinearScheduler
+      params:
+        warm_up_steps: [10000]
+        cycle_lengths: [10000000000000]
+        f_start: [1.e-6]
+        f_max: [1.]
+        f_min: [1.]
+
+    denoiser_config:
+      target: sgm.modules.diffusionmodules.denoiser.DiscreteDenoiser
+      params:
+        num_idx: 1000
+
+        scaling_config:
+          target: sgm.modules.diffusionmodules.denoiser_scaling.EpsScaling
+        discretization_config:
+          target: sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
+
+    network_config:
+      target: sgm.modules.diffusionmodules.openaimodel.DualUNetModel
+      params:
+        adm_in_channels: 2816
+        num_classes: sequential
+        use_checkpoint: True
+        in_channels: 4
+        out_channels: 4
+        model_channels: 320
+        attention_resolutions: [4, 2]
+        num_res_blocks: 2
+        channel_mult: [1, 2, 4]
+        num_head_channels: 64
+        use_linear_in_transformer: True
+        transformer_depth: [1, 2, 10]
+        context_dim: 2048
+        spatial_transformer_attn_type: softmax-xformers
+        hq_code_resolutions: [4,2,1]
+        semb_channels: 256
+        lq_cond_config:
+          use_checkpoint: True
+          in_channels: 4
+          out_channels: 256
+          model_channels: 256
+          attention_resolutions: [4, 2]
+          num_res_blocks: 2
+          channel_mult: [1, 2, 4]
+          num_head_channels: 64
+          use_linear_in_transformer: True
+          transformer_depth: [1, 2, 10]
+
+    conditioner_config:
+      target: sgm.modules.GeneralConditioner
+      params:
+        emb_models:
+          - is_trainable: False
+            input_key: txt
+            target: sgm.modules.encoders.modules.FrozenCLIPEmbedder
+            # output: [batch, 77, 768]
+            params:
+              layer: hidden
+              layer_idx: 11
+              local_dir: /mnt/lustrenew/huangrenyuan/zoo/CLIP/ViT-L-14
+
+          - is_trainable: False
+            input_key: txt
+            target: sgm.modules.encoders.modules.FrozenOpenCLIPEmbedder2
+            # output: [[batch, 77, 1280], [batch, 1280]]
+            params:
+              arch: ViT-bigG-14
+              # version: laion2b_s39b_b160k
+              version: /mnt/lustrenew/huangrenyuan/zoo/CLIP/ViT-bigG-14/open_clip_pytorch_model.bin
+              freeze: True
+              layer: penultimate
+              always_return_pooled: True
+              legacy: False
+
+          - is_trainable: False
+            input_key: original_size_as_tuple
+            target: sgm.modules.encoders.modules.ConcatTimestepEmbedderND
+            # output: [batch, 512]
+            params:
+              outdim: 256
+
+          - is_trainable: False
+            input_key: crop_coords_top_left
+            target: sgm.modules.encoders.modules.ConcatTimestepEmbedderND
+            params:
+              outdim: 256
+
+          - is_trainable: False
+            input_key: target_size_as_tuple
+            target: sgm.modules.encoders.modules.ConcatTimestepEmbedderND
+            # output: [batch, 512]
+            params:
+              outdim: 256
+
+    first_stage_config:
+      target: sgm.models.autoencoder.AutoencoderKL
+      params:
+        embed_dim: 4
+        monitor: val/rec_loss
+        ddconfig:
+          attn_type: vanilla-xformers
+          double_z: true
+          z_channels: 4
+          resolution: 256
+          in_channels: 3
+          out_ch: 3
+          ch: 128
+          ch_mult: [1, 2, 4, 4]
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+        lossconfig:
+          target: torch.nn.Identity
+
+    restorer_config:
+      target: basicsr.models.codeformer_model.CodeFormer
+      params:
+        # ignore_keys: ['generator']
+        # only for init
+        ckpt_path: /mnt/lustrenew/huangrenyuan/logs/512_CodeFormer/20240102_094453_CodeFormer_stage3/models/net_g_190000.pth
+        dim_embd: 512          # 512
+        n_head: 8              # 8
+        n_layers: 9            # 9
+        codebook_size: 1024    # 1024
+        latent_size: 256       # default
+        connect_list: ['32', '64', '128', '256']            # [32, 64, 128, 256]
+        fix_modules: ['encoder', 'quantize','generator']    # default, frozen module
+        vqgan_path: ~
+        # vqgan_config:
+          # quantizer_type: nearest
+
+    struct_cond_config:
+      target: sgm.modules.encoders.dict_encoder.StructEncoderWT
+      params:
+        used_levels: ['512', '256', '128']
+        configs:
+          '512':
+            in_channels: 3
+            attn_reso: []
+          '256':
+            in_channels: 128
+            attn_reso: [4]
+          '128':
+            in_channels: 128
+            attn_reso: [4, 2]
+          '64':
+            in_channels: 256
+            attn_reso: [4, 2, 1]
+        encoder_config:
+          target: ldm.modules.diffusionmodules.openaimodel.EncoderUNetModelWT
+          params:
+            image_size: 96
+            model_channels: 256
+            out_channels: 256
+            num_res_blocks: 2
+            dropout: 0
+            channel_mult: [ 1, 1, 2, 2 ]
+            conv_resample: True
+            dims: 2
+            use_checkpoint: True
+            use_fp16: False
+            num_heads: 4
+            num_head_channels: -1
+            num_heads_upsample: -1
+            use_scale_shift_norm: False
+            resblock_updown: False
+            use_new_attention_order: False
+
+    loss_fn_config:
+      target: sgm.modules.diffusionmodules.loss.StandardDiffusionLoss
+      params:
+        batch2model_keys: struct_cond
+        loss_weighting_config:
+          target: sgm.modules.diffusionmodules.loss_weighting.EpsWeighting
+        sigma_sampler_config:
+          target: sgm.modules.diffusionmodules.sigma_sampling.DiscreteSampling
+          params:
+            num_idx: 1000
+
+            discretization_config:
+              target: sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
+
+    sampler_config:
+      target: sgm.modules.diffusionmodules.sampling.EulerEDMSampler
+      params:
+        num_steps: 50
+
+        discretization_config:
+          target: sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
+
+        guider_config:
+          target: sgm.modules.diffusionmodules.guiders.VanillaCFG
+          params:
+            scale: 1.0
+    
+    degradation_config:
+      sf: 4
+      batch_size: 6
+      queue_size: 180
+      gt_size: 512
+      no_degradation_prob: 0.01
+      random_size: False
+      # the first degradation process
+      resize_prob: [0.2, 0.7, 0.1]  # up, down, keep
+      resize_range: [0.3, 1.5]
+      gaussian_noise_prob: 0.5
+      noise_range: [1, 15]
+      poisson_scale_range: [0.05, 2.0]
+      gray_noise_prob: 0.4
+      jpeg_range: [60, 95]
+
+      # the second degradation process
+      second_blur_prob: 0.5
+      resize_prob2: [0.3, 0.4, 0.3]  # up, down, keep
+      resize_range2: [0.6, 1.2]
+      gaussian_noise_prob2: 0.5
+      noise_range2: [1, 12]
+      poisson_scale_range2: [0.05, 1.0]
+      gray_noise_prob2: 0.4
+      jpeg_range2: [60, 100]
+
+data:
+  target: sgm.data.dataset.LDMDataModuleFromConfig
+  params:
+    batch_size: 6
+    num_workers: 4
+
+    train:
+      # RealESRGAN dataset
+      target: basicsr.data.realesrgan_dataset.RealESRGANDataset
+      params:
+        org_prob: 0.1
+        # dataset_prob: [0.2, 0.3, 0.3, 0.1, 0.1]
+        dataset_configs:
+        - gt_path: '/mnt/lustre/share_data/yuyitong/data/HDPortrait_2022'
+          image_type: jpg
+          num_pic: 8000
+          mul_num: ~
+          resize_range: [1024, 1280, 1536, 1792, 2048, 2304, 2560]
+        - gt_path: '/mnt/lustre/share_data/chengjuntong/SLR_HQ_2021_ori_crop_selected'
+          image_type: jpg
+          mul_num: 10
+          num_pic: 12000
+          resize_range: [1792, 2048, 2304, 2560, 2816, 3072, 3328]
+        - gt_path: '/mnt/lustre/share_data/zhouyurou/data/images/SLR_HQ_20231028_crop'
+          image_type: jpg
+          mul_num: 4
+          num_pic: 12000
+          resize_range: [1536, 1792, 2048, 2304, 2560, 2816, 3072]
+        - gt_path: '/mnt/lustre/share_data/chengjuntong/SLR_HQ_20230503_crop_selected'
+          image_type: jpg
+          mul_num: 2
+          num_pic: 4000
+          resize_range: [3072, 3328, 3840, 4352, 4864]
+        - gt_path: /mnt/lustre/share_data/wangchao4/data/faces/FFHQ
+          image_type: png
+          num_pic: 4000
+        crop_size: 512
+        io_backend:
+          type: disk
+
+        blur_kernel_size: 21
+        kernel_list: ['iso', 'aniso', 'generalized_iso', 'generalized_aniso', 'plateau_iso', 'plateau_aniso']
+        kernel_prob: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+        sinc_prob: 0.1
+        blur_sigma: [0.2, 1.5]
+        betag_range: [0.5, 2.0]
+        betap_range: [1, 1.5]
+
+        blur_kernel_size2: 11
+        kernel_list2: ['iso', 'aniso', 'generalized_iso', 'generalized_aniso', 'plateau_iso', 'plateau_aniso']
+        kernel_prob2: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+        sinc_prob2: 0.1
+        blur_sigma2: [0.2, 1.0]
+        betag_range2: [0.5, 2.0]
+        betap_range2: [1, 1.5]
+
+        final_sinc_prob: 0.8
+
+        gt_size: 512
+        use_hflip: True
+        use_rot: True
+
+    validation:
+      target: basicsr.data.realesrgan_dataset.RealESRGANDataset
+      params:
+        org_prob: 1
+        dataset_configs:
+        - gt_path: '/mnt/lustre/share_data/chengjuntong/SLR_HQ_20230503_crop_selected'
+          image_type: jpg
+          mul_num: 2
+          num_pic: 4000
+          resize_range: []
+        crop_size: 512
+        io_backend:
+          type: disk
+
+        blur_kernel_size: 21
+        kernel_list: ['iso', 'aniso', 'generalized_iso', 'generalized_aniso', 'plateau_iso', 'plateau_aniso']
+        kernel_prob: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+        sinc_prob: 0.1
+        blur_sigma: [0.2, 1.5]
+        betag_range: [0.5, 2.0]
+        betap_range: [1, 1.5]
+
+        blur_kernel_size2: 11
+        kernel_list2: ['iso', 'aniso', 'generalized_iso', 'generalized_aniso', 'plateau_iso', 'plateau_aniso']
+        kernel_prob2: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+        sinc_prob2: 0.1
+        blur_sigma2: [0.2, 1.0]
+        betag_range2: [0.5, 2.0]
+        betap_range2: [1, 1.5]
+
+        final_sinc_prob: 0.8
+
+        gt_size: 512
+        use_hflip: True
+        use_rot: False
+
+lightning:
+  modelcheckpoint:
+    params:
+      every_n_train_steps: 500
+      save_top_k: 1
+      save_last: False
+
+  callbacks:
+    # metrics_over_trainsteps_checkpoint:
+    #   params:
+    #     every_n_train_steps: 2500
+
+    image_logger:
+      target: main.ImageLogger
+      params:
+        disabled: False
+        enable_autocast: False
+        batch_frequency: 1000
+        max_images: 4
+        increase_log_steps: True
+        log_first_step: True
+        log_images_kwargs:
+          use_ema_scope: False
+          N: 4
+          n_rows: 2
+
+  trainer:
+    devices: 0,
+    benchmark: True
+    num_sanity_val_steps: 0
+    accumulate_grad_batches: 4
+    max_epochs: 1000

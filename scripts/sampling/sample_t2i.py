@@ -41,7 +41,7 @@ def get_parser(**parser_kwargs):
         "--version",
         type=str,
         const=True,
-        default="SDXL-base-1.0",
+        default="sdxl",
         nargs="?",
         help="model arch",
     )
@@ -275,8 +275,6 @@ def txt2img(opt):
         filter = DeepFloydDataFiltering(verbose=False)
     else:
         filter = None
-        
-    # state = init_st(version_dict, load_filter=True)
     if msg: print(msg)
 
     init_dict = {
@@ -288,7 +286,7 @@ def txt2img(opt):
 
     is_legacy = version_dict["is_legacy"]
 
-    if not is_legacy: opt.negative_prompt = ""  # which is unused
+    if not is_legacy: negative_prompt = ""  # which is unused
 
     stage2strength = None
     finish_denoising = False
