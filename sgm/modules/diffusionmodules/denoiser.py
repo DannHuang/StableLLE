@@ -33,6 +33,9 @@ class Denoiser(nn.Module):
         sigma = append_dims(sigma, input.ndim)
         c_skip, c_out, c_in, c_noise = self.scaling(sigma)
         c_noise = self.possibly_quantize_c_noise(c_noise.reshape(sigma_shape))
+        for key, additional_input in additional_model_inputs.items():
+            if additional_input.shape[0]*2 == input.shape[0]:
+                additional_model_inputs[key] = torch.cat([additional_input] * 2)
         return (
             network(input * c_in, c_noise, cond, **additional_model_inputs) * c_out
             + input * c_skip

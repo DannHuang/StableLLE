@@ -2,6 +2,7 @@ import logging
 import math
 from inspect import isfunction
 from typing import Any, Optional
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -9,6 +10,7 @@ from einops import rearrange, repeat
 from packaging import version
 from torch import nn
 from torch.utils.checkpoint import checkpoint
+checkpoint = partial(checkpoint, use_reentrant=False)
 
 logpy = logging.getLogger(__name__)
 

@@ -67,7 +67,7 @@ class RealESRGANDataset(data.Dataset):
                         self.paths = [v for v in paths]
                 if 'meta_num' in config:
                     self.paths = sorted(self.paths)[:config['meta_num']]
-            if 'gt_path' in config:
+            elif 'gt_path' in config:
                 if isinstance(config['gt_path'], str):
                     local_paths.extend(sorted([str(x) for x in Path(config['gt_path']).glob('**/*.'+config['image_type'])]))
                 else:
@@ -75,11 +75,11 @@ class RealESRGANDataset(data.Dataset):
                     if len(config['gt_path']) > 1:
                         for i in range(len(config['gt_path'])-1):
                             local_paths.extend(sorted([str(x) for x in Path(config['gt_path'][i+1]).glob('**/*.'+config['image_type'])]))
-            if 'imagenet_path' in config:
+            elif 'imagenet_path' in config:
                 class_list = os.listdir(config['imagenet_path'])
                 for class_file in class_list:
                     local_paths.extend(sorted([str(x) for x in Path(os.path.join(config['imagenet_path'], class_file)).glob('**/*.'+'JPEG')]))
-            if 'face_gt_path' in config:
+            elif 'face_gt_path' in config:
                 if isinstance(config['face_gt_path'], str):
                     face_list = sorted([str(x) for x in Path(config['face_gt_path']).glob('**/*.[jpJP][pnPN]*[gG]')])
                     local_paths.extend(face_list[:config['num_face']])
@@ -175,6 +175,7 @@ class RealESRGANDataset(data.Dataset):
                 if dataset_index==0:
                     gt_path = self.paths[0][index]
                 else: gt_path = self.paths[dataset_index][index-self.bins[dataset_index-1]]
+                resize_range = self.resize_range[dataset_index]
                 time.sleep(1)  # sleep 1s for occasional server congestion
             else:
                 break
@@ -187,7 +188,15 @@ class RealESRGANDataset(data.Dataset):
 
         while img_gt.shape[0] * img_gt.shape[1] < 384*384 or img_size<100:
             index = random.randint(0, self.__len__()-1)
-            gt_path = self.paths[index]
+            dataset_index = 0
+            while dataset_index < len(self.bins):
+                if index < self.bins[dataset_index]:
+                    break
+                else: dataset_index+=1
+            if dataset_index==0:
+                gt_path = self.paths[0][index]
+            else: gt_path = self.paths[dataset_index][index-self.bins[dataset_index-1]]
+            resize_range = self.resize_range[dataset_index]
 
             time.sleep(0.1)  # sleep 1s for occasional server congestion
             img_bytes = self.file_client.get(gt_path, 'gt')

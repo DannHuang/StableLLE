@@ -3,6 +3,8 @@ import datetime
 import glob
 import inspect
 import os
+# os.environ["TORCH_CPP_LOG_LEVEL"]="INFO"
+# os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
 import sys
 from inspect import Parameter
 from typing import Union
@@ -30,7 +32,7 @@ MULTINODE_HACKS = True
 
 def default_trainer_args():
     argspec = dict(inspect.signature(Trainer.__init__).parameters)
-    argspec.pop("self")
+    argspec.pop("self")     # Trainer arguments and its default value dictionary
     default_args = {
         param: argspec[param].default
         for param in argspec
@@ -341,13 +343,13 @@ class ImageLogger(Callback):
         self.log_before_first_step = log_before_first_step
 
     @rank_zero_only
-    def _tensorboard_log_img(self, k, img, batch_idx, split, pl_module=None):
+    def _tensorboard_log_img(self, pl_module, k, img, batch_idx, split):
         pl_module.logger.experiment.add_image(
             f"{split}/{k}", img,
             global_step=pl_module.global_step)
             
     @rank_zero_only
-    def _wandb_log_img(self, k, img, batch_idx, split, pl_module=None):
+    def _wandb_log_img(self, pl_module, k, img, batch_idx, split):
         pl_module.logger.log_image(
                     key=f"{split}/{k}",
                     images=[
@@ -437,10 +439,9 @@ class ImageLogger(Callback):
                     if self.clamp and not isheatmap(images[k]):
                         images[k] = torch.clamp(images[k], -1.0, 1.0)
 
-            logger_log_images = self.logger_log_images.get(logger, None)
-            if logger_log_images:
-                logger_log_images = lambda key, grid, batch_idx, split: \
-                    logger_log_images(key, grid, batch_idx, split, pl_module=pl_module)
+            base_logger_function = self.logger_log_images.get(logger, None)
+            if base_logger_function:
+                logger_log_images = lambda key, grid, batch_idx, split: base_logger_function(pl_module, key, grid, batch_idx, split)
             self.log_local(
                 pl_module.logger.save_dir,
                 split,
@@ -656,12 +657,13 @@ if __name__ == "__main__":
         #
         standard_args = default_trainer_args()
         for k in standard_args:
-            if getattr(opt, k) != standard_args[k]:
+            if getattr(opt, k) != standard_args[k]:     # CLI has highest priority
                 trainer_config[k] = getattr(opt, k)
 
         ckpt_resume_path = opt.resume_from_checkpoint
 
         if not "devices" in trainer_config and trainer_config["accelerator"] != "gpu":
+            raise RuntimeError("Training requires GPU")
             del trainer_config["accelerator"]
             cpu = True
         else:

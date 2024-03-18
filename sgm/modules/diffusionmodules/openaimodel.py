@@ -1464,10 +1464,11 @@ class DualUNetModel(nn.Module):
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
+        assert struct_cond is not None, "please insert structral condition"
         assert (y is not None) == (
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
-        h_lq = self.lq_encoder(struct_cond, timesteps)
+        h_lq = self.lq_encoder(struct_cond, timesteps, context, y)
         hs = []
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
         emb = self.time_embed(t_emb)
@@ -1530,6 +1531,7 @@ class UNetEncoder(nn.Module):
         channel_mult: Union[List, Tuple] = (1, 2, 4, 8),
         conv_resample: bool = True,
         dims: int = 2,
+        num_classes: Optional[Union[int, str]] = None,
         use_checkpoint: bool = False,
         num_heads: int = -1,
         num_head_channels: int = -1,
@@ -1541,7 +1543,10 @@ class UNetEncoder(nn.Module):
         disable_self_attentions: Optional[List[bool]] = None,
         num_attention_blocks: Optional[List[int]] = None,
         disable_middle_transformer: bool = False,
+        disable_middle_self_attn: bool = False,
         use_linear_in_transformer: bool = False,
+        spatial_transformer_attn_type: str = "softmax",
+        adm_in_channels: Optional[int] = None,
     ):
         super().__init__()
 
@@ -1596,6 +1601,7 @@ class UNetEncoder(nn.Module):
         self.dropout = dropout
         self.channel_mult = channel_mult
         self.conv_resample = conv_resample
+        self.num_classes = num_classes
         self.use_checkpoint = use_checkpoint
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
@@ -1607,6 +1613,33 @@ class UNetEncoder(nn.Module):
             nn.SiLU(),
             linear(time_embed_dim, time_embed_dim),
         )
+
+        if self.num_classes is not None:
+            if isinstance(self.num_classes, int):
+                self.label_emb = nn.Embedding(num_classes, time_embed_dim)
+            elif self.num_classes == "continuous":
+                logpy.info("setting up linear c_adm embedding layer")
+                self.label_emb = nn.Linear(1, time_embed_dim)
+            elif self.num_classes == "timestep":
+                self.label_emb = nn.Sequential(
+                    Timestep(model_channels),
+                    nn.Sequential(
+                        linear(model_channels, time_embed_dim),
+                        nn.SiLU(),
+                        linear(time_embed_dim, time_embed_dim),
+                    ),
+                )
+            elif self.num_classes == "sequential":
+                assert adm_in_channels is not None
+                self.label_emb = nn.Sequential(
+                    nn.Sequential(
+                        linear(adm_in_channels, time_embed_dim),
+                        nn.SiLU(),
+                        linear(time_embed_dim, time_embed_dim),
+                    )
+                )
+            else:
+                raise ValueError
 
         self.input_blocks = nn.ModuleList(
             [
@@ -1650,10 +1683,15 @@ class UNetEncoder(nn.Module):
                         or nr < num_attention_blocks[level]
                     ):
                         layers.append(
-                            AttentionBlock(
+                            SpatialTransformer(
                                 ch,
-                                num_heads=num_heads,
-                                num_head_channels=dim_head,
+                                num_heads,
+                                dim_head,
+                                depth=transformer_depth[level],
+                                context_dim=context_dim,
+                                disable_self_attn=disabled_sa,
+                                use_linear=use_linear_in_transformer,
+                                attn_type=spatial_transformer_attn_type,
                                 use_checkpoint=use_checkpoint,
                             )
                         )
@@ -1700,10 +1738,15 @@ class UNetEncoder(nn.Module):
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
             ),
-            AttentionBlock(
+            SpatialTransformer(
                 ch,
-                num_heads=num_heads,
-                num_head_channels=dim_head,
+                num_heads,
+                dim_head,
+                depth=transformer_depth_middle,
+                context_dim=context_dim,
+                disable_self_attn=disable_middle_self_attn,
+                use_linear=use_linear_in_transformer,
+                attn_type=spatial_transformer_attn_type,
                 use_checkpoint=use_checkpoint,
             )
             if not disable_middle_transformer
@@ -1740,6 +1783,8 @@ class UNetEncoder(nn.Module):
         self,
         x: th.Tensor,
         timesteps: Optional[th.Tensor] = None,
+        context: Optional[th.Tensor] = None,
+        y: Optional[th.Tensor] = None,
         **kwargs,
     ) -> th.Tensor:
         """
@@ -1750,18 +1795,25 @@ class UNetEncoder(nn.Module):
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
+        assert (y is not None) == (
+            self.num_classes is not None
+        ), "must specify y if and only if the model is class-conditional"
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
         emb = self.time_embed(t_emb)
+
+        if self.num_classes is not None:
+            assert y.shape[0] == x.shape[0]
+            emb = emb + self.label_emb(y)
 
         result_list = []
         results = {}
         h = x
         for module in self.input_blocks:
             last_h = h
-            h = module(h, emb)
+            h = module(h, emb, context)
             if last_h.shape[-1] != h.shape[-1]:
                 result_list.append(last_h)
-        h = self.middle_block(h, emb)
+        h = self.middle_block(h, emb, context)
         result_list.append(h)
         assert len(result_list) == len(self.fea_tran)
 

@@ -24,6 +24,9 @@ class Guider(ABC):
 class VanillaCFG(Guider):
     def __init__(self, scale: float):
         self.scale = scale
+        print(
+            "Caution: CFG sampler will require extra Vram, please decrease sample batch size accordinrly."
+        )
 
     def __call__(self, x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         x_u, x_c = x.chunk(2)
@@ -31,6 +34,11 @@ class VanillaCFG(Guider):
         return x_pred
 
     def prepare_inputs(self, x, s, c, uc):
+        '''
+        :return x: torch.Tensor([2*batch, c, h, w])
+                s: torch.Tensor([2*batch, d])
+                c_out: dict of torch.Tensor([2*batch, *cond_shape])
+        '''
         c_out = dict()
 
         for k in c:

@@ -47,7 +47,7 @@ class BaseDiffusionSampler:
         x *= torch.sqrt(1.0 + sigmas[0] ** 2.0)
         num_sigmas = len(sigmas)
 
-        s_in = x.new_ones([x.shape[0]])
+        s_in = x.new_ones([x.shape[0]])     # for ease of batchify
 
         return x, s_in, sigmas, num_sigmas, cond, uc
 
