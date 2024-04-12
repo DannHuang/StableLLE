@@ -12,7 +12,7 @@ from pytorch_lightning.callbacks import Callback
 import torchvision
 from PIL import Image
 # from pytorch_lightning.utilities.rank_zero import rank_zero_only
-from sgm.util import instantiate_from_config
+from ldm.util import instantiate_from_config
 from omegaconf import OmegaConf
 
 def load_model_from_config(config, ckpt, verbose=False):
@@ -131,8 +131,8 @@ class MyDataset(Dataset):
         data_root=''
     ):
         self.data_root=data_root
-        self.input_paths=self._get_image_paths(self.data_root+'/input')
-        self.target_paths=self._get_image_paths(self.data_root+'/target')
+        self.input_paths=self._get_image_paths(self.data_root+'/low')
+        self.target_paths=self._get_image_paths(self.data_root+'/high')
 
     def __len__(self):
         return len(self.input_paths)
@@ -208,7 +208,7 @@ checkpoint_callback = ModelCheckpoint(
 
 trainer = pl.Trainer(
     accelerator='gpu', 
-    devices=4,
+    devices=1,
     precision=32, 
     # callbacks=[checkpoint_callback],
     max_epochs=max_epoch
