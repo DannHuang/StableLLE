@@ -12,7 +12,7 @@ from pytorch_lightning.callbacks import Callback
 import torchvision
 from PIL import Image
 # from pytorch_lightning.utilities.rank_zero import rank_zero_only
-from ldm.util import instantiate_from_config
+from sgm.util import instantiate_from_config
 from omegaconf import OmegaConf
 
 def load_model_from_config(config, ckpt, verbose=False):
@@ -171,14 +171,14 @@ class MyDataset(Dataset):
         return image_paths
 
 # Configs
-resume_path = '/data0/jinhongbo/stablediffusion/checkpoints/SD2.1/v2-1_512-ema-pruned.ckpt'
+resume_path = '/share/huangrenyuan/zoo/sd/v2-1_512-ema-pruned.ckpt'
 batch_size = 1
 logger_freq = 300
 learning_rate = 1e-5
 sd_locked = True
 only_mid_control = False
 
-config = OmegaConf.load('/data0/jinhongbo/stablediffusion/configs/finetune/finetune-debug.yaml')
+config = OmegaConf.load('/data/huangrenyuan/projects/StableLLE/configs/LLIE/train.yaml')
 # First use cpu to load models. Pytorch Lightning will automatically move it to GPUs.
 model = load_model_from_config(
     config=config,
@@ -191,14 +191,14 @@ model.only_mid_control = only_mid_control
 max_epoch=2
 
 # Misc
-dataset = MyDataset('/data0/jinhongbo/stablediffusion/data/LOLv1/Train')
+dataset = MyDataset('/share/huangrenyuan/dataset/lol_dataset/our485')
 dataloader = DataLoader(dataset, num_workers=0, batch_size=batch_size, shuffle=True)
 # logger = ImageLogger(batch_frequency=logger_freq)
 
 from pytorch_lightning.callbacks import ModelCheckpoint
 
 checkpoint_callback = ModelCheckpoint(
-    dirpath='/data3/jinhongbo/StableLLE/checkpoints',
+    dirpath='/share/huangrenyuan/logs/StabLLE',
     filename='{epoch}-{val_loss:.2f}',  # 根据需要自定义文件名格式
     monitor='val_loss',
     mode='min',
@@ -208,7 +208,7 @@ checkpoint_callback = ModelCheckpoint(
 
 trainer = pl.Trainer(
     accelerator='gpu', 
-    devices=torch.cuda.device_count(),
+    devices=4,
     precision=32, 
     # callbacks=[checkpoint_callback],
     max_epochs=max_epoch
@@ -219,6 +219,6 @@ trainer = pl.Trainer(
 trainer.fit(model, dataloader)
 
 
-output_path='/data0/jinhongbo/stablediffusion/checkpoints/outputs/finetune_.ckpt'
+output_path='/share/huangrenyuan/logs/StableLLE/finetune_.ckpt'
 torch.save(model.state_dict(), output_path)
 
