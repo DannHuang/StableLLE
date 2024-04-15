@@ -1,3 +1,4 @@
+import os
 from torch.utils import data as data
 from torchvision.transforms.functional import normalize
 
@@ -6,6 +7,8 @@ from basicsr.data.transforms import augment, paired_random_crop
 from basicsr.utils import FileClient, bgr2ycbcr, imfrombytes, img2tensor
 from basicsr.utils.registry import DATASET_REGISTRY
 import cv2
+import numpy as np
+import random
 
 
 @DATASET_REGISTRY.register()
@@ -36,7 +39,7 @@ class PairedImageDataset(data.Dataset):
         phase (str): 'train' or 'val'.
     """
 
-    def __init__(self, opt):
+    def __init__(self, **opt):
         super(PairedImageDataset, self).__init__()
         self.opt = opt
         # file client (io backend)
@@ -44,28 +47,41 @@ class PairedImageDataset(data.Dataset):
         self.io_backend_opt = opt['io_backend']
         self.mean = opt['mean'] if 'mean' in opt else None
         self.std = opt['std'] if 'std' in opt else None
+        self.paths = []
+        self.bins = []
+        for config in opt['dataset_configs']:
+            if 'image_type' not in config:
+                config['image_type'] = 'png'
+            
+            # support multiple type of data: file path and meta data, remove support of lmdb
+            lq_folder = os.path.join(config['root'], 'Low')
+            gt_folder = os.path.join(config['root'], 'Normal')
+            local_paths=paired_paths_from_folder([lq_folder, gt_folder], ['lq', 'gt'], self.filename_tmpl)
 
-        self.gt_folder, self.lq_folder = opt['dataroot_gt'], opt['dataroot_lq']
-        if 'filename_tmpl' in opt:
-            self.filename_tmpl = opt['filename_tmpl']
-        else:
-            self.filename_tmpl = '{}'
+            # limit number of pictures for test
+            if config.get('mul_num', None):
+                local_paths = local_paths * config['mul_num']
+            if config.get('num_pic', None):
+                if 'val' or 'test' in opt:
+                    random.shuffle(local_paths)
+                    local_paths = local_paths[-config['num_pic']:]
+                else:
+                    local_paths = local_paths[-config['num_pic']:]
+            # print('>>>>>>>>>>>>>>>>>>>>>')
+            # print(self.paths)
+            print(f"get {len(local_paths)} images from {config['gt_path']}")
+            self.paths.append(local_paths)
+            self.bins.append(len(local_paths))
+        
+        for i in range(len(self.bins)):
+            if i>0: self.bins[i] = self.bins[i-1]+self.bins[i]
+        print(f"Mixed-dataset distribution: {self.bins}")
 
-        if self.io_backend_opt['type'] == 'lmdb':
-            self.io_backend_opt['db_paths'] = [self.lq_folder, self.gt_folder]
-            self.io_backend_opt['client_keys'] = ['lq', 'gt']
-            self.paths = paired_paths_from_lmdb([self.lq_folder, self.gt_folder], ['lq', 'gt'])
-        elif 'meta_info_file' in self.opt and self.opt['meta_info_file'] is not None:
-            self.paths = paired_paths_from_meta_info_file_2([self.lq_folder, self.gt_folder], ['lq', 'gt'],
-                                                          self.opt['meta_info_file'], self.filename_tmpl)
-        else:
-            self.paths = paired_paths_from_folder([self.lq_folder, self.gt_folder], ['lq', 'gt'], self.filename_tmpl)
+        # self.paths = paired_paths_from_folder([self.lq_folder, self.gt_folder], ['lq', 'gt'], self.filename_tmpl)
 
     def __getitem__(self, index):
         if self.file_client is None:
             self.file_client = FileClient(self.io_backend_opt.pop('type'), **self.io_backend_opt)
-
-        scale = self.opt['scale']
 
         # Load gt and lq images. Dimension order: HWC; channel order: BGR;
         # image range: [0, 1], float32.
@@ -83,6 +99,20 @@ class PairedImageDataset(data.Dataset):
             pad_w = max(0, self.opt['gt_size'] - w)
             img_gt = cv2.copyMakeBorder(img_gt, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
             img_lq = cv2.copyMakeBorder(img_lq, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
+        if h > self.opt['gt_size'] or w > self.opt['gt_size']:
+            # size = min(jpg.shape[1], jpg.shape[2])
+            # delta_h = jpg.shape[1] - size
+            # delta_w = jpg.shape[2] - size
+            # assert not all(
+            #     [delta_h, delta_w]
+            # )  # we assume that the image is already resized such that the smallest size is at the desired size. Thus, eiter delta_h or delta_w must be zero
+            # then, randomly choose top and left coordinates
+            top = random.randint(0, h - self.opt['gt_size'])
+            left = random.randint(0, w - self.opt['gt_size'])
+            # center crop
+            # top = (int(h/scale) - crop_pad_size) // 2 -1
+            # left = (int(w/scale) - crop_pad_size) // 2 -1
+            img_gt = img_gt[top:top + self.opt['gt_size'], left:left + self.opt['gt_size'], ...]
 
         # augmentation for training
         if self.opt['phase'] == 'train':
@@ -99,8 +129,8 @@ class PairedImageDataset(data.Dataset):
 
         # crop the unmatched GT images during validation or testing, especially for SR benchmark datasets
         # TODO: It is better to update the datasets, rather than force to crop
-        if self.opt['phase'] != 'train':
-            img_gt = img_gt[0:img_lq.shape[0] * scale, 0:img_lq.shape[1] * scale, :]
+        # if self.opt['phase'] != 'train':
+        #     img_gt = img_gt[0:img_lq.shape[0] * scale, 0:img_lq.shape[1] * scale, :]
 
         # BGR to RGB, HWC to CHW, numpy to tensor
         img_gt, img_lq = img2tensor([img_gt, img_lq], bgr2rgb=True, float32=True)

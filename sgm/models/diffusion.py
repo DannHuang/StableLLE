@@ -400,7 +400,7 @@ class IRDiffusionEngine(pl.LightningModule):
         self.scheduler_config = scheduler_config
         self.degradation_config = degradation_config
         self._init_first_stage(first_stage_config)
-        self._init_first_restorer(restorer_config)
+        # self._init_first_restorer(restorer_config)
 
         self.loss_fn = (
             instantiate_from_config(loss_fn_config)

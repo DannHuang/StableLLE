@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 from packaging import version
+from .dwt import DWT2D
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 checkpoint = partial(checkpoint, use_reentrant=False)
@@ -758,4 +759,124 @@ class SimpleTransformer(nn.Module):
     ) -> torch.Tensor:
         for layer in self.layers:
             x = layer(x, context)
+        return x
+
+
+class WaveletTransformer(nn.Module):
+    """
+    Transformer block for image-like data.
+    First, project the input (aka embedding)
+    and reshape to b, t, d.
+    Then apply standard transformer action.
+    Finally, reshape to image
+    NEW: use_linear for more efficiency instead of the 1x1 convs
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        n_heads,
+        d_head,
+        depth=1,
+        dropout=0.0,
+        context_dim=None,
+        disable_self_attn=False,
+        use_linear=False,
+        attn_type="softmax",
+        use_checkpoint=True,
+        # sdp_backend=SDPBackend.FLASH_ATTENTION
+        sdp_backend=None,
+        wavelet_kernel="haar",
+    ):
+        super().__init__()
+        n_heads = n_heads*4
+        logpy.debug(
+            f"constructing {self.__class__.__name__} of depth {depth} w/ "
+            f"{in_channels} channels and {n_heads} heads."
+        )
+
+        if exists(context_dim) and not isinstance(context_dim, list):
+            context_dim = [context_dim]
+        if exists(context_dim) and isinstance(context_dim, list):
+            if depth != len(context_dim):
+                logpy.warn(
+                    f"{self.__class__.__name__}: Found context dims "
+                    f"{context_dim} of depth {len(context_dim)}, which does not "
+                    f"match the specified 'depth' of {depth}. Setting context_dim "
+                    f"to {depth * [context_dim[0]]} now."
+                )
+                # depth does not match context dims.
+                assert all(
+                    map(lambda x: x == context_dim[0], context_dim)
+                ), "need homogenous context_dim to match depth automatically"
+                context_dim = depth * [context_dim[0]]
+        elif context_dim is None:
+            context_dim = [None] * depth
+        self.in_channels = in_channels
+        if wavelet_kernel not in ["haar"]:
+            raise ValueError("Only Haar wave is supported")
+        self.dwt = DWT2D(kernel=wavelet_kernel)
+        inner_dim = n_heads * d_head
+        self.norm = Normalize(inner_dim)
+        # if not use_linear:
+        #     self.proj_in = nn.Conv2d(
+        #         in_channels, inner_dim, kernel_size=1, stride=1, padding=0
+        #     )
+        # else:
+        #     self.proj_in = nn.Linear(in_channels, inner_dim)
+
+        self.transformer_blocks = nn.ModuleList(
+            [
+                BasicTransformerBlock(
+                    inner_dim,
+                    n_heads,
+                    d_head,
+                    dropout=dropout,
+                    context_dim=context_dim[d],
+                    disable_self_attn=disable_self_attn,
+                    attn_mode=attn_type,
+                    checkpoint=use_checkpoint,
+                    sdp_backend=sdp_backend,
+                )
+                for d in range(depth)
+            ]
+        )
+        if not use_linear:
+            self.proj_out = zero_module(
+                nn.Conv2d(inner_dim, inner_dim, kernel_size=1, stride=1, padding=0)
+            )
+        else:
+            # self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
+            self.proj_out = zero_module(nn.Linear(inner_dim, in_channels))
+        self.use_linear = use_linear
+
+    def forward(self, x, ll_feats: dict):
+        # note: if no context is given, cross-attention defaults to self-attention
+        ll = ll_feats[str(x.shape[-1])]
+        assert x.shape == ll.shape, f"Input shape {x.shape} does not match LL shape {ll.shape}"
+        ll_a, ll_h, ll_v, ll_d = self.dwt.decompose(ll)
+        ll_feat = [torch.cat([ll_a, ll_h, ll_v, ll_d], dim=1)]
+        x_a, x_h, x_v, x_d = self.dwt.decompose(x)
+        x = torch.cat([x_a, x_h, x_v, x_d], dim=1)   # 4xChannel, 0.5xH, 0.5xW
+        b, c, h, w = x.shape
+        # TODO: residual connect subband
+        x_in = x
+        x = self.norm(x)
+        # if not self.use_linear:
+        #     # FIXME: convolution will mix-up subbands
+        #     x = self.proj_in(x)
+        x = rearrange(x, "b c h w -> b (h w) c").contiguous()
+        # if self.use_linear:
+        #     x = self.proj_in(x)
+        for i, block in enumerate(self.transformer_blocks):
+            if i > 0 and len(ll_feat) == 1:
+                i = 0  # use same context for each block
+            x = block(x, context=ll_feat[i])
+        if self.use_linear:
+            x = self.proj_out(x)
+        x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w).contiguous()
+        if not self.use_linear:
+            x = self.proj_out(x)
+        x = x + x_in
+        x = self.dwt.inverse(x)
         return x

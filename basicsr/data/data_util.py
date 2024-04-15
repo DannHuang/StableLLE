@@ -244,7 +244,7 @@ def paired_paths_from_meta_info_file_2(folders, keys, meta_info_file, filename_t
         paths.append(dict([(f'{input_key}_path', input_path), (f'{gt_key}_path', gt_path)]))
     return paths
 
-def paired_paths_from_folder(folders, keys, filename_tmpl):
+def paired_paths_from_folder(folders, keys, filename_tmpl="{}"):
     """Generate paired paths from folders.
 
     Args:

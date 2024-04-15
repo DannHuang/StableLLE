@@ -1,0 +1,218 @@
+model:
+  base_learning_rate: 5.0e-5
+  target: sgm.models.diffusion.IRDiffusionEngine
+  params:
+    scale_factor: 0.18215
+    ckpt_path: /share/huangrenyuan/zoo/sd/v2_1/v2-1_512-ema-pruned.ckpt
+    input_key: gt
+    disable_first_stage_autocast: True
+    freeze_unet: True
+    log_keys:
+      - cls
+
+    scheduler_config:
+      target: sgm.lr_scheduler.LambdaLinearScheduler
+      params:
+        warm_up_steps: [10000]
+        cycle_lengths: [10000000000000]
+        f_start: [1.e-6]
+        f_max: [1.]
+        f_min: [1.]
+
+    denoiser_config:
+      target: sgm.modules.diffusionmodules.denoiser.DiscreteDenoiser
+      params:
+        num_idx: 1000
+
+        scaling_config:
+          target: sgm.modules.diffusionmodules.denoiser_scaling.EpsScaling
+        discretization_config:
+          target: sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
+
+    network_config:
+      target: sgm.modules.diffusionmodules.openaimodel.WaveletUNetModel
+      params:
+        use_checkpoint: True
+        in_channels: 4
+        out_channels: 4
+        model_channels: 320
+        attention_resolutions: [4, 2, 1]
+        num_res_blocks: 2
+        channel_mult: [1, 2, 4, 4]
+        num_head_channels: 64
+        use_linear_in_transformer: True
+        transformer_depth: 1
+        context_dim: 1024
+        control_config:
+          use_checkpoint: True
+          in_channels: 4
+          out_channels: 256     # equals to semb_channels
+          model_channels: 320
+          attention_resolutions: [4, 2, 1]
+          num_res_blocks: 2
+          channel_mult: [1, 2, 4, 4]
+          num_head_channels: 64
+          use_linear_in_transformer: True
+          transformer_depth: 1
+          # context_dim: 1024   # no context MHA
+          # spatial_transformer_attn_type: softmax-xformers
+
+    conditioner_config:
+      target: sgm.modules.GeneralConditioner
+      params:
+        emb_models:
+          - is_trainable: False
+            input_key: txt
+            target: sgm.modules.encoders.modules.FrozenOpenCLIPEmbedder
+            params:
+              freeze: true
+              layer: penultimate
+              arch: ViT-H-14
+              version: /share/huangrenyuan/zoo/clip/open_clip_pytorch_model.bin
+
+
+    first_stage_config:
+      target: sgm.models.autoencoder.AutoencoderKL
+      params:
+        embed_dim: 4
+        monitor: val/rec_loss
+        ddconfig:
+          double_z: true
+          z_channels: 4
+          resolution: 256
+          in_channels: 3
+          out_ch: 3
+          ch: 128
+          ch_mult: [1, 2, 4, 4]
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+        lossconfig:
+          target: torch.nn.Identity
+
+    loss_fn_config:
+      target: sgm.modules.diffusionmodules.loss.StandardDiffusionLoss
+      params:
+        batch2model_keys: struct_cond
+        loss_weighting_config:
+          target: sgm.modules.diffusionmodules.loss_weighting.EpsWeighting
+        sigma_sampler_config:
+          target: sgm.modules.diffusionmodules.sigma_sampling.DiscreteSampling
+          params:
+            num_idx: 1000
+
+            discretization_config:
+              target: sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
+
+    sampler_config:
+      target: sgm.modules.diffusionmodules.sampling.EulerEDMSampler
+      params:
+        num_steps: 50
+
+        discretization_config:
+          target: sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
+
+        guider_config:
+        # IdentityGuider, VanillaCFG
+          target: sgm.modules.diffusionmodules.guiders.IdentityGuider
+          # params:
+          #   scale: 5.0
+    
+    degradation_config:
+      sf: 4
+      batch_size: 1
+      queue_size: 180
+      gt_size: 512
+      no_degradation_prob: 0.01
+      random_size: False
+      # the first degradation process
+      resize_prob: [0.2, 0.7, 0.1]  # up, down, keep
+      resize_range: [0.3, 1.5]
+      gaussian_noise_prob: 0.5
+      noise_range: [1, 15]
+      poisson_scale_range: [0.05, 2.0]
+      gray_noise_prob: 0.4
+      jpeg_range: [60, 95]
+
+      # the second degradation process
+      second_blur_prob: 0.5
+      resize_prob2: [0.3, 0.4, 0.3]  # up, down, keep
+      resize_range2: [0.6, 1.2]
+      gaussian_noise_prob2: 0.5
+      noise_range2: [1, 12]
+      poisson_scale_range2: [0.05, 1.0]
+      gray_noise_prob2: 0.4
+      jpeg_range2: [60, 100]
+
+data:
+  target: sgm.data.dataset.LDMDataModuleFromConfig
+  params:
+    batch_size: 1
+    num_workers: 2
+
+    train:
+      # RealESRGAN dataset
+      target: basicsr.data.paried_image_dataset.PairedImageDataset
+      params:
+        gt_size: 384
+        org_prob: 0.1
+        # dataset_prob: [0.2, 0.3, 0.3, 0.1, 0.1]
+        dataset_configs:
+        - root: /share/huangrenyuan/dataset/LOL-v2/Synthetic/Train/Low
+          image_type: png
+          mul_num: 4
+          # num_pic: 12000
+          # resize_range: [1024, 1280, 1536, 1792, 2048, 2304, 2560]
+        - root: /share/huangrenyuan/dataset/train/Huawei/Low
+          image_type: jpg
+        - root: /share/huangrenyuan/dataset/train/Huawei/Nikon/Low
+          image_type: jpg
+        crop_size: 384
+        io_backend:
+          type: disk
+
+    validation:
+      target: basicsr.data.paried_image_dataset.PairedImageDataset
+      params:
+        org_prob: 1
+        dataset_configs:
+        - root: /share/huangrenyuan/dataset/LOL-v2/Real_captured/Train/Low
+          image_type: png
+          mul_num: 2
+        crop_size: 384
+        io_backend:
+          type: disk
+
+lightning:
+  modelcheckpoint:
+    params:
+      every_n_train_steps: 500
+      save_top_k: 1
+      save_last: False
+
+  callbacks:
+    # metrics_over_trainsteps_checkpoint:
+    #   params:
+    #     every_n_train_steps: 2500
+
+    image_logger:
+      target: main.ImageLogger
+      params:
+        disabled: False
+        enable_autocast: False
+        batch_frequency: 1000
+        max_images: 4
+        increase_log_steps: True
+        log_first_step: True
+        log_images_kwargs:
+          use_ema_scope: False
+          N: 3
+          n_rows: 2
+
+  trainer:
+    benchmark: True
+    device: 1
+    strategy: ddp
+    num_sanity_val_steps: 0
+    accumulate_grad_batches: 4
+    max_epochs: 1000
