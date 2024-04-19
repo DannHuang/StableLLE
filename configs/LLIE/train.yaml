@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 1.0e-4
+  base_learning_rate: 5.0e-5
   target: ldm.models.diffusion.ddpm.LatentDiffusion
   params:
     use_ori_img: true

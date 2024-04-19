@@ -913,13 +913,13 @@ if __name__ == "__main__":
             import requests
 
             device = os.environ.get("CUDA_VISIBLE_DEVICES", "?")
-            hostname = socket.gethostname()
-            ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-            resp = requests.get("http://169.254.169.254/latest/meta-data/instance-id")
-            print(
-                f"ERROR at {ts} on {hostname}/{resp.text} (CUDA_VISIBLE_DEVICES={device}): {type(err).__name__}: {err}",
-                flush=True,
-            )
+            # hostname = socket.gethostname()
+            # ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            # resp = requests.get("http://169.254.169.254/latest/meta-data/instance-id")
+            # print(
+            #     f"ERROR at {ts} on {hostname}/{resp.text} (CUDA_VISIBLE_DEVICES={device}): {type(err).__name__}: {err}",
+            #     flush=True,
+            # )
         raise err
     except Exception:
         if opt.debug and trainer.global_rank == 0:
