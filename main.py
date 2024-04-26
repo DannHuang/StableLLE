@@ -19,7 +19,7 @@ from packaging import version
 from PIL import Image
 from pytorch_lightning import seed_everything
 from pytorch_lightning.callbacks import Callback
-from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.utilities import rank_zero_only
 
@@ -369,6 +369,8 @@ class ImageLogger(Callback):
                 grid = torchvision.utils.make_grid(images[k], nrow=4)
                 if self.rescale:
                     grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
+                if isinstance(pl_module.logger, TensorBoardLogger):
+                    pl_module.logger.experiment.add_image(f"{split}/{k}", grid, pl_module.global_step)
                 grid = grid.transpose(0, 1).transpose(1, 2).squeeze(-1)
                 grid = grid.numpy()
                 grid = (grid * 255).astype(np.uint8)
@@ -379,10 +381,7 @@ class ImageLogger(Callback):
                 os.makedirs(os.path.split(path)[0], exist_ok=True)
                 img = Image.fromarray(grid)
                 img.save(path)
-                if exists(pl_module):
-                    assert isinstance(
-                        pl_module.logger, WandbLogger
-                    ), "logger_log_image only supports WandbLogger currently"
+                if isinstance( pl_module.logger, WandbLogger):
                     pl_module.logger.log_image(
                         key=f"{split}/{k}",
                         images=[
@@ -434,8 +433,6 @@ class ImageLogger(Callback):
                 pl_module.current_epoch,
                 batch_idx,
                 pl_module=pl_module
-                if isinstance(pl_module.logger, WandbLogger)
-                else None,
             )
 
             if is_train:
@@ -685,8 +682,14 @@ if __name__ == "__main__":
                     "save_dir": logdir,
                 },
             },
+            "tensorboard": {
+                "target": "pytorch_lightning.loggers.TensorBoardLogger",
+                "params": {
+                    "save_dir": logdir,
+                },
+            }
         }
-        default_logger_cfg = default_logger_cfgs["wandb" if opt.wandb else "csv"]
+        default_logger_cfg = default_logger_cfgs["wandb" if opt.wandb else "tensorboard"]
         if opt.wandb:
             # TODO change once leaving "swiffer" config directory
             try:

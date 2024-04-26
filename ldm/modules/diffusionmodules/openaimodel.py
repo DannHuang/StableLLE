@@ -1702,6 +1702,11 @@ class WaveletUNetEncoder(nn.Module):
                 )
             ]
         )
+        self.proj_out = nn.ModuleList(
+            [
+                conv_nd(dims, model_channels, model_channels, 3, padding=1)
+            ]
+        )
         self._feature_size = model_channels
         input_block_chans = [model_channels]
         ch = model_channels
@@ -1755,6 +1760,9 @@ class WaveletUNetEncoder(nn.Module):
                             )
                         )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
+                self.proj_out.append(
+                    zero_module(conv_nd(dims, ch, ch, 3, padding=1))
+                    )
                 self._feature_size += ch
                 input_block_chans.append(ch)
             if level != len(channel_mult) - 1:
@@ -1776,6 +1784,9 @@ class WaveletUNetEncoder(nn.Module):
                             ch, conv_resample, dims=dims, out_channels=out_ch
                         )
                     )
+                )
+                self.proj_out.append(
+                    zero_module(conv_nd(dims, out_ch, out_ch, 3, padding=1))
                 )
                 ch = out_ch
                 input_block_chans.append(ch)
@@ -1826,6 +1837,10 @@ class WaveletUNetEncoder(nn.Module):
             ),
         )
         self._feature_size += ch
+        self.proj_out.append(
+            zero_module(conv_nd(dims, ch, ch, 3, padding=1))
+        )
+        assert len(self.proj_out) == len(self.input_blocks) + 1, f"{len(self.proj_out)} != {len(self.input_blocks)+1}"
 
     def convert_to_fp16(self):
         """
@@ -1863,11 +1878,13 @@ class WaveletUNetEncoder(nn.Module):
             emb = emb + self.label_emb(y)
 
         h = control_input.type(self.dtype)
-        for module in self.input_blocks:
+        for i, module in enumerate(self.input_blocks):
             h = module(h, emb, context)
-            hs.append(h.type(x.dtype))
+            h_out = self.proj_out[i](h)
+            hs.append(h_out.type(x.dtype))
         h = self.middle_block(h, emb, context)
-        hs.append(h.type(x.dtype))
+        h_out = self.proj_out[-1](h)
+        hs.append(h_out.type(x.dtype))
         return hs
 
 
