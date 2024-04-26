@@ -391,8 +391,8 @@ class ImageLogger(Callback):
                 grid = torchvision.utils.make_grid(images[k], nrow=4)
                 if self.rescale:
                     grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
-                if logger_log_images:
-                    logger_log_images(k, grid, batch_idx, split)
+                if isinstance(pl_module.logger, TensorBoardLogger):
+                    pl_module.logger.experiment.add_image(f"{split}/{k}", grid, pl_module.global_step)
                 grid = grid.transpose(0, 1).transpose(1, 2).squeeze(-1)
                 grid = grid.numpy()
                 grid = (grid * 255).astype(np.uint8)
@@ -403,6 +403,14 @@ class ImageLogger(Callback):
                 os.makedirs(os.path.split(path)[0], exist_ok=True)
                 img = Image.fromarray(grid)
                 img.save(path)
+                if isinstance( pl_module.logger, WandbLogger):
+                    pl_module.logger.log_image(
+                        key=f"{split}/{k}",
+                        images=[
+                            img,
+                        ],
+                        step=pl_module.global_step,
+                    )
 
     @rank_zero_only
     def log_img(self, pl_module, batch, batch_idx, split="train"):
@@ -449,7 +457,7 @@ class ImageLogger(Callback):
                 pl_module.global_step,
                 pl_module.current_epoch,
                 batch_idx,
-                logger_log_images=logger_log_images,
+                pl_module=pl_module
             )
 
             if is_train:
@@ -703,10 +711,9 @@ if __name__ == "__main__":
             "tensorboard": {
                 "target": "pytorch_lightning.loggers.TensorBoardLogger",
                 "params": {
-                    "name": "tensorboard",
                     "save_dir": logdir,
-                }
-            },
+                },
+            }
         }
         default_logger_cfg = default_logger_cfgs["wandb" if opt.wandb else "tensorboard"]
         if opt.wandb:
@@ -937,13 +944,13 @@ if __name__ == "__main__":
             import requests
 
             device = os.environ.get("CUDA_VISIBLE_DEVICES", "?")
-            hostname = socket.gethostname()
-            ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-            resp = requests.get("http://169.254.169.254/latest/meta-data/instance-id")
-            print(
-                f"ERROR at {ts} on {hostname}/{resp.text} (CUDA_VISIBLE_DEVICES={device}): {type(err).__name__}: {err}",
-                flush=True,
-            )
+            # hostname = socket.gethostname()
+            # ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            # resp = requests.get("http://169.254.169.254/latest/meta-data/instance-id")
+            # print(
+            #     f"ERROR at {ts} on {hostname}/{resp.text} (CUDA_VISIBLE_DEVICES={device}): {type(err).__name__}: {err}",
+            #     flush=True,
+            # )
         raise err
     except Exception:
         if opt.debug and trainer.global_rank == 0:

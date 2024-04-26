@@ -1,6 +1,7 @@
 # extensions
 *.egg-info
 *.py[cod]
+*.ipynb
 
 # envs
 .pt13

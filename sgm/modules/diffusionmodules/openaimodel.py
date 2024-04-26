@@ -1909,7 +1909,6 @@ class WaveletUNetModel(nn.Module):
             emb = emb + self.label_emb(y)
 
         ll_feats = self.control_module(ll_input, emb, context)
-        print(ll_feats)
 
         h = x
         for module in self.input_blocks:

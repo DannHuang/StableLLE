@@ -850,9 +850,14 @@ class WaveletTransformer(nn.Module):
             self.proj_out = zero_module(nn.Linear(inner_dim, in_channels))
         self.use_linear = use_linear
 
-    def forward(self, x, ll_feats: dict):
+    def forward(self, x, ll_feats: dict=None):
         # note: if no context is given, cross-attention defaults to self-attention
-        ll = ll_feats[str(x.shape[-1])]
+        if ll_feats is not None:
+            # WMHCA
+            ll = ll_feats[str(x.shape[-1])]
+        else:
+            # WMHSA
+            ll = x
         assert x.shape == ll.shape, f"Input shape {x.shape} does not match LL shape {ll.shape}"
         ll_a, ll_h, ll_v, ll_d = self.dwt.decompose(ll)
         ll_feat = [torch.cat([ll_a, ll_h, ll_v, ll_d], dim=1)]

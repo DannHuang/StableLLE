@@ -56,7 +56,8 @@ class PairedImageDataset(data.Dataset):
             # support multiple type of data: file path and meta data, remove support of lmdb
             lq_folder = os.path.join(config['root'], 'Low')
             gt_folder = os.path.join(config['root'], 'Normal')
-            local_paths=paired_paths_from_folder([lq_folder, gt_folder], ['lq', 'gt'], self.filename_tmpl)
+            filename_tmpl = config.get('filename_tmpl', '{}')
+            local_paths=paired_paths_from_folder([lq_folder, gt_folder], ['lq', 'gt'], filename_tmpl)
 
             # limit number of pictures for test
             if config.get('mul_num', None):
@@ -69,10 +70,10 @@ class PairedImageDataset(data.Dataset):
                     local_paths = local_paths[-config['num_pic']:]
             # print('>>>>>>>>>>>>>>>>>>>>>')
             # print(self.paths)
-            print(f"get {len(local_paths)} images from {config['gt_path']}")
-            self.paths.append(local_paths)
+            print(f"get {len(local_paths)} images from {config['root']}")
+            self.paths.extend(local_paths)
             self.bins.append(len(local_paths))
-        
+
         for i in range(len(self.bins)):
             if i>0: self.bins[i] = self.bins[i-1]+self.bins[i]
         print(f"Mixed-dataset distribution: {self.bins}")
@@ -113,14 +114,16 @@ class PairedImageDataset(data.Dataset):
             # top = (int(h/scale) - crop_pad_size) // 2 -1
             # left = (int(w/scale) - crop_pad_size) // 2 -1
             img_gt = img_gt[top:top + self.opt['gt_size'], left:left + self.opt['gt_size'], ...]
+            img_lq = img_lq[top:top + self.opt['gt_size'], left:left + self.opt['gt_size'], ...]
+
 
         # augmentation for training
-        if self.opt['phase'] == 'train':
-            gt_size = self.opt['gt_size']
-            # random crop
-            img_gt, img_lq = paired_random_crop(img_gt, img_lq, gt_size, scale, gt_path)
-            # flip, rotation
-            img_gt, img_lq = augment([img_gt, img_lq], self.opt['use_hflip'], self.opt['use_rot'])
+        # if self.opt['phase'] == 'train':
+        #     gt_size = self.opt['gt_size']
+        #     # random crop
+        #     img_gt, img_lq = paired_random_crop(img_gt, img_lq, gt_size, scale, gt_path)
+        #     # flip, rotation
+        #     img_gt, img_lq = augment([img_gt, img_lq], self.opt['use_hflip'], self.opt['use_rot'])
 
         # color space transform
         if 'color' in self.opt and self.opt['color'] == 'y':
@@ -135,9 +138,8 @@ class PairedImageDataset(data.Dataset):
         # BGR to RGB, HWC to CHW, numpy to tensor
         img_gt, img_lq = img2tensor([img_gt, img_lq], bgr2rgb=True, float32=True)
         # normalize
-        if self.mean is not None or self.std is not None:
-            normalize(img_lq, self.mean, self.std, inplace=True)
-            normalize(img_gt, self.mean, self.std, inplace=True)
+        img_gt = img_gt * 2. - 1.
+        img_lq = img_lq * 2. - 1.
 
         return {'lq': img_lq, 'gt': img_gt, 'lq_path': lq_path, 'gt_path': gt_path}
 

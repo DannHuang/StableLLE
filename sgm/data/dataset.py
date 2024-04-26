@@ -7,7 +7,9 @@ import webdataset as wds
 from omegaconf import DictConfig
 from functools import partial
 from pytorch_lightning import LightningDataModule
-from sgm.util import exists, instantiate_from_config
+from torch.utils.data import random_split, DataLoader, Dataset
+from sgm.util import instantiate_from_config
+from functools import partial
 
 try:
     from sdata import create_dataset, create_dummy_dataset, create_loader
@@ -18,7 +20,7 @@ except ImportError as e:
     print("please use ``git submodule update --init --recursive``")
     print("and do ``pip install -e stable-datasets/`` from the root of this repo")
     print("#" * 100)
-    exit(1)
+    # exit(1)
 
 
 class StableDataModuleFromConfig(LightningDataModule):
@@ -82,27 +84,11 @@ class StableDataModuleFromConfig(LightningDataModule):
 
     def test_dataloader(self) -> wds.DataPipeline:
         return create_loader(self.test_datapipeline, **self.test_config.loader)
-
-
-def worker_init_fn(_):
-    worker_info = get_worker_info()
-
-    dataset = worker_info.dataset
-    worker_id = worker_info.id
-
-    # if isinstance(dataset, Txt2ImgIterableBaseDataset):
-    #     split_size = dataset.num_records // worker_info.num_workers
-    #     # reset num_records to the true number to retain reliable length information
-    #     dataset.sample_ids = dataset.valid_ids[worker_id * split_size:(worker_id + 1) * split_size]
-    #     current_id = np.random.choice(len(np.random.get_state()[1]), 1)
-    #     return np.random.seed(np.random.get_state()[1][current_id] + worker_id)
-    # else:
-    return np.random.seed(np.random.get_state()[1][0] + worker_id)
-
+    
 
 class LDMDataModuleFromConfig(LightningDataModule):
-    def __init__(self, batch_size, train=None, validation=None, test=None,
-                 num_workers=None, shuffle_test_loader=False, use_worker_init_fn=False,
+    def __init__(self, batch_size, train=None, validation=None, test=None, predict=None,
+                 wrap=False, num_workers=None, shuffle_test_loader=False, use_worker_init_fn=False,
                  shuffle_val_dataloader=False):
         super().__init__()
         self.batch_size = batch_size
@@ -118,52 +104,61 @@ class LDMDataModuleFromConfig(LightningDataModule):
         if test is not None:
             self.dataset_configs["test"] = test
             self.test_dataloader = partial(self._test_dataloader, shuffle=shuffle_test_loader)
+        if predict is not None:
+            self.dataset_configs["predict"] = predict
+            self.predict_dataloader = self._predict_dataloader
+        self.wrap = wrap
 
     def prepare_data(self):
-        # for data_cfg in self.dataset_configs.values():
-        #     instantiate_from_config_sr(data_cfg)
-        pass
+        for data_cfg in self.dataset_configs.values():
+            instantiate_from_config(data_cfg)
 
     def setup(self, stage=None):
-        print('+++++++ Setting up Datasets +++++++')
         self.datasets = dict(
             (k, instantiate_from_config(self.dataset_configs[k]))
             for k in self.dataset_configs)
+        if self.wrap:
+            for k in self.datasets:
+                self.datasets[k] = WrappedDataset(self.datasets[k])
 
     def _train_dataloader(self):
         # is_iterable_dataset = isinstance(self.datasets['train'], Txt2ImgIterableBaseDataset)
         # if is_iterable_dataset or self.use_worker_init_fn:
-        if self.use_worker_init_fn:
-            init_fn = worker_init_fn
-        else:
-            init_fn = None
+        #     init_fn = worker_init_fn
+        # else:
+        #     init_fn = None
         return DataLoader(self.datasets["train"], batch_size=self.batch_size,
-                          num_workers=self.num_workers, shuffle=True,
-                          worker_init_fn=init_fn)
+                          num_workers=self.num_workers, shuffle= True,
+                          worker_init_fn=None)
 
     def _val_dataloader(self, shuffle=False):
         # if isinstance(self.datasets['validation'], Txt2ImgIterableBaseDataset) or self.use_worker_init_fn:
-        if self.use_worker_init_fn:
-            init_fn = worker_init_fn
-        else:
-            init_fn = None
+        #     init_fn = worker_init_fn
+        # else:
+        #     init_fn = None
         return DataLoader(self.datasets["validation"],
                           batch_size=self.batch_size,
                           num_workers=self.num_workers,
-                          worker_init_fn=init_fn,
+                          worker_init_fn=None,
                           shuffle=shuffle)
 
     def _test_dataloader(self, shuffle=False):
         # is_iterable_dataset = isinstance(self.datasets['train'], Txt2ImgIterableBaseDataset)
         # if is_iterable_dataset or self.use_worker_init_fn:
-        if self.use_worker_init_fn:
-            init_fn = worker_init_fn
-        else:
-            init_fn = None
+        #     init_fn = worker_init_fn
+        # else:
+        #     init_fn = None
 
         # do not shuffle dataloader for iterable dataset
         # shuffle = shuffle and (not is_iterable_dataset)
 
         return DataLoader(self.datasets["test"], batch_size=self.batch_size,
-                          num_workers=self.num_workers, worker_init_fn=init_fn, shuffle=shuffle)
+                          num_workers=self.num_workers, worker_init_fn=None, shuffle=shuffle)
 
+    def _predict_dataloader(self, shuffle=False):
+        # if isinstance(self.datasets['predict'], Txt2ImgIterableBaseDataset) or self.use_worker_init_fn:
+        #     init_fn = worker_init_fn
+        # else:
+        #     init_fn = None
+        return DataLoader(self.datasets["predict"], batch_size=self.batch_size,
+                          num_workers=self.num_workers, worker_init_fn=None)
