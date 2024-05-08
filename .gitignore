@@ -6,6 +6,7 @@
 # envs
 .pt13
 .pt2
+.idea
 
 # directories
 /checkpoints
@@ -13,3 +14,5 @@
 /outputs
 /build
 /src
+/data
+/lightning_logs

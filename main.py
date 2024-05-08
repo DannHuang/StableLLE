@@ -368,6 +368,7 @@ class ImageLogger(Callback):
         current_epoch,
         batch_idx,
         logger_log_images = None,
+
     ):
         root = os.path.join(save_dir, "images", split)
         for k in images:
@@ -403,7 +404,7 @@ class ImageLogger(Callback):
                 os.makedirs(os.path.split(path)[0], exist_ok=True)
                 img = Image.fromarray(grid)
                 img.save(path)
-                if isinstance( pl_module.logger, WandbLogger):
+                if isinstance(pl_module.logger, WandbLogger):
                     pl_module.logger.log_image(
                         key=f"{split}/{k}",
                         images=[

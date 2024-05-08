@@ -8,7 +8,7 @@ model:
     num_timesteps_cond: 1
     log_every_t: 200
     timesteps: 1000
-    ckpt_path: /share/huangrenyuan/model_zoo/v2-1/v2-1_512-ema-pruned.ckpt
+    ckpt_path: checkpoints/diffusion/v2-1_512-ema-pruned.ckpt
     first_stage_key: "image"
     cond_stage_key: "txt"
     freeze_unet: True
@@ -61,7 +61,7 @@ model:
         freeze: True
         layer: "penultimate"
         arch: "ViT-H-14"
-        version: /share/huangrenyuan/model_zoo/clip/open_clip_pytorch_model.bin
+        version: checkpoints/text/ViT-H-14/open_clip_pytorch_model.bin
 
     first_stage_config:
       target: ldm.models.autoencoder.AutoencoderKL
@@ -101,15 +101,15 @@ data:
         org_prob: 0.1
         # dataset_prob: [0.2, 0.3, 0.3, 0.1, 0.1]
         dataset_configs:
-        - root: /share/huangrenyuan/dataset/llie/LOL-v2/Synthetic/Train
+        - root: data/LOLv1/our485
           image_type: png
           mul_num: 4
           # num_pic: 12000
           # resize_range: [1024, 1280, 1536, 1792, 2048, 2304, 2560]
-        - root: /share/huangrenyuan/dataset/llie/LSRW/Huawei
-          image_type: jpg
-        - root: /share/huangrenyuan/dataset/llie/LSRW/Nikon
-          image_type: jpg
+#        - root: /share/huangrenyuan/dataset/llie/LSRW/Huawei
+#          image_type: jpg
+#        - root: /share/huangrenyuan/dataset/llie/LSRW/Nikon
+#          image_type: jpg
         crop_size: 384
         io_backend:
           type: disk
@@ -120,7 +120,8 @@ data:
         gt_size: 384
         org_prob: 1
         dataset_configs:
-        - root: /share/huangrenyuan/dataset/llie/LOL-v2/Real_captured/Train
+        - root: data/LOLv1/eval15
+#        - /share/huangrenyuan/dataset/llie/LOL-v2/Real_captured/Train
           image_type: png
           mul_num: 2
           filename_tmpl: "low{}"
