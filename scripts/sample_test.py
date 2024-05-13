@@ -1,6 +1,7 @@
 """make variations of input image"""
 
 import argparse, os, sys, glob
+import cv2
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import PIL
 import torch
@@ -20,6 +21,7 @@ from pytorch_lightning import seed_everything
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 from basicsr.metrics import calculate_niqe
+from scripts.util_images import wavelet_reconstruction, calculate_psnr,calculate_ssim
 import math
 import copy
 
@@ -143,6 +145,10 @@ def load_img(path):
 	image = torch.from_numpy(image)
 	return 2.*image - 1.
 
+def load_original_img(path):
+	image = Image.open(path).convert("RGB")
+	original = np.array(image)
+	return original
 
 def main():
 	parser = argparse.ArgumentParser()
@@ -152,14 +158,23 @@ def main():
 		type=str,
 		nargs="?",
 		help="path to the input image",
-		default="inputs/user_upload",
+		default="../data/LOLv1/eval15/low",
 	)
+
+	parser.add_argument(
+		"--normal_img",
+		type=str,
+		nargs="?",
+		help="path to the normal image",
+		default="../data/LOLv1/eval15/high",
+	)
+
 	parser.add_argument(
 		"--outdir",
 		type=str,
 		nargs="?",
 		help="dir to write results to",
-		default="outputs/user_upload",
+		default="../outputs",
 	)
 	parser.add_argument(
 		"--n_samples",
@@ -170,13 +185,13 @@ def main():
 	parser.add_argument(
 		"--config",
 		type=str,
-		default="configs/LLIE/sd21_train.yaml",
+		default="../configs/LLIE/sd21_train.yaml",
 		help="path to config which constructs model",
 	)
 	parser.add_argument(
 		"--ckpt",
 		type=str,
-		default="/share/huangrenyuan/logs/stablle/test/checkpoints/epoch=000013.ckpt",
+		default="../logs/2024-05-11T11-03-03_LLIE-sd21_train/checkpoints/epoch=000006.ckpt",
 		help="path to checkpoint of model",
 	)
 	parser.add_argument(
@@ -288,6 +303,10 @@ def main():
 
 	precision_scope = autocast if opt.precision == "autocast" else nullcontext
 	niqe_list = []
+	psnr_scores = []
+	ssim_scores = []
+	normal_img_path = opt.normal_img
+
 	with torch.no_grad():
 		with model.ema_scope():
 			tic = time.time()
@@ -342,12 +361,31 @@ def main():
 					niqe_list.append(calculate_niqe(x_sample, 0, input_order='HWC', convert_to='y'))
 					Image.fromarray(x_sample.astype(np.uint8)).save(
 						os.path.join(sample_path, cur_img_list[i]))
+
+					# calculate PSNR and SSIM
+					high_image_path = os.path.join(normal_img_path, cur_img_list[i])
+					high_image_original = load_original_img(high_image_path)
+					high_image_original = cv2.resize(high_image_original, (576, 384), interpolation=cv2.INTER_CUBIC)
+
+					psnr_value = calculate_psnr(high_image_original, x_sample.astype(np.uint8), border=0,
+													ycbcr=False)
+					ssim_value = calculate_ssim(high_image_original, x_sample.astype(np.uint8), border=0,
+													ycbcr=False)
+
+					psnr_scores.append(psnr_value)
+					ssim_scores.append(ssim_value)
+
 				# save_input
 				# for i in range(init_image.size(0)):
 				# 	x_input = 255. * rearrange(init_image[i].cpu().numpy(), 'c h w -> h w c')
 				# 	x_input = (x_input+255.)/2
 				# 	Image.fromarray(x_input.astype(np.uint8)).save(
 				# 		os.path.join(input_path, cur_img_list[i]))
+			avg_psnr = np.mean(psnr_scores)
+			print(f"Average PSNR: {avg_psnr:.2f}dB")
+
+			avg_ssim = np.mean(ssim_scores)
+			print(f"Average SSIM: {avg_ssim:.2f}")
 
 			assert len(niqe_list) == len(img_list)
 			avg_niqe = np.mean(np.array(niqe_list))
