@@ -19,7 +19,7 @@ from pytorch_lightning import seed_everything
 
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
-from basicsr.metrics import calculate_niqe
+from basicsr.metrics import calculate_niqe, calculate_psnr
 import math
 import copy
 
@@ -113,17 +113,18 @@ def chunk(it, size):
 
 
 def load_model_from_config(config, ckpt, verbose=False):
-	print(f"Loading model from {ckpt}")
 	pl_sd = torch.load(ckpt, map_location="cpu")
 	if "global_step" in pl_sd:
 		print(f"Global Step: {pl_sd['global_step']}")
 	sd = pl_sd["state_dict"]
 	model = instantiate_from_config(config.model)
+	print(f"Loading model from {ckpt}")
 	m, u = model.load_state_dict(sd, strict=False)
 	print('>>>>>>>>>>>>>>>>>>>load results>>>>>>>>>>>>>>>>>>>>>>>')
 	if len(m) > 0 and verbose:
 		print("missing keys:")
 		print(m)
+		exit()
 	if len(u) > 0 and verbose:
 		print("unexpected keys:")
 		print(u)
@@ -176,7 +177,7 @@ def main():
 	parser.add_argument(
 		"--ckpt",
 		type=str,
-		default="/share/huangrenyuan/logs/stablle/test/checkpoints/epoch=000013.ckpt",
+		default="/share/huangrenyuan/logs/stablle/test/checkpoints/last.ckpt",
 		help="path to checkpoint of model",
 	)
 	parser.add_argument(
@@ -240,8 +241,7 @@ def main():
 	print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>')
 
 	transform = torchvision.transforms.Compose([
-		# torchvision.transforms.Resize(opt.input_size),
-		torchvision.transforms.CenterCrop(opt.input_size),
+		torchvision.transforms.Resize(opt.input_size),
 	])
 
 	config = OmegaConf.load(f"{opt.config}")
@@ -297,7 +297,7 @@ def main():
 				for item in cur_img_list:
 					cur_image = load_img(os.path.join(opt.init_img, item)).to(device)
 
-					# cur_image = transform(cur_image)
+					cur_image = transform(cur_image)
 					init_image_list.append(cur_image)
 				init_image = torch.cat(init_image_list, dim=0)
 				encoder_posterior = model.encode_first_stage(init_image)
@@ -321,27 +321,27 @@ def main():
 				t = repeat(torch.tensor([999]), '1 -> b', b=init_image.size(0))
 				t = t.to(device).long()
 				x_T = model.q_sample(x_start=init_latent, t=t, noise=noise)
-				# x_T = None
 
 				samples, _ = sampler.ddim_sampling_sr_t(cond=semantic_c,
 												 struct_cond=init_latent,
-												 shape=init_latent.shape,
-												 unconditional_conditioning=nega_semantic_c if opt.use_negative_prompt else None,
-												 unconditional_guidance_scale=opt.scale if opt.use_negative_prompt else None,
-												 timesteps=np.array(ddim_timesteps),
-												 x_T=x_T)
+												 shape=init_latent.shape,)
 				x_samples = model.decode_first_stage(samples)
+				x_recon = model.decode_first_stage(init_latent)
 				if opt.colorfix_type == 'adain':
 					x_samples = adaptive_instance_normalization(x_samples, init_image)
 				elif opt.colorfix_type == 'wavelet':
 					x_samples = wavelet_reconstruction(x_samples, init_image)
 				x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
+				x_recon = torch.clamp((x_recon + 1.0) / 2.0, min=0.0, max=1.0)
 
 				for i in range(x_samples.size(0)):
 					x_sample = 255. * rearrange(x_samples[i].cpu().numpy(), 'c h w -> h w c')
-					niqe_list.append(calculate_niqe(x_sample, 0, input_order='HWC', convert_to='y'))
+					x_rec = 255. * rearrange(x_recon[i].cpu().numpy(), 'c h w -> h w c')
+					# niqe_list.append(calculate_psnr(x_sample, 0, input_order='HWC', convert_to='y'))
 					Image.fromarray(x_sample.astype(np.uint8)).save(
 						os.path.join(sample_path, cur_img_list[i]))
+					Image.fromarray(x_rec.astype(np.uint8)).save(
+						os.path.join(input_path, cur_img_list[i]))
 				# save_input
 				# for i in range(init_image.size(0)):
 				# 	x_input = 255. * rearrange(init_image[i].cpu().numpy(), 'c h w -> h w c')
@@ -349,10 +349,10 @@ def main():
 				# 	Image.fromarray(x_input.astype(np.uint8)).save(
 				# 		os.path.join(input_path, cur_img_list[i]))
 
-			assert len(niqe_list) == len(img_list)
-			avg_niqe = np.mean(np.array(niqe_list))
+			# assert len(niqe_list) == len(img_list)
+			# avg_niqe = np.mean(np.array(niqe_list))
 
-			print(f"Average NIQE score: {avg_niqe:.3f} \n")
+			# print(f"Average NIQE score: {avg_niqe:.3f} \n")
 
 			toc = time.time()
 
